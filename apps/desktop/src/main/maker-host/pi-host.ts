@@ -1455,16 +1455,18 @@ export function buildPiNativeProvidersFromConfigs(
           modelApi === 'google-generative-ai' && !m.route?.requestPath && !rt.requestPath
             ? providerBaseUrlForApi(rt.baseUrl, modelApi) : undefined;
         // OpenAI clients use /v1 as their root; Anthropic appends /v1/messages.
-        // Limit this fallback to a bare /v1 path so custom proxy prefixes stay intact.
+        // The protocol selector saves a same-endpoint route when the user picks
+        // Messages, so that route needs the same correction. Distinct routes and
+        // custom proxy prefixes remain authoritative.
         const nativeAnthropicBaseUrl =
           modelApi === 'anthropic-messages' &&
           (runtimeApi === 'openai-completions' || runtimeApi === 'openai-responses') &&
-          authMethod !== 'oauth' && !m.route && !rt.requestPath
+          authMethod !== 'oauth' && !rt.requestPath && !m.route?.requestPath &&
+          (!m.route || (m.route.baseUrl === rt.baseUrl && m.route.wireProtocol === 'anthropic-messages'))
             ? anthropicRootForOpenAiV1(rt.baseUrl) : undefined;
         const modelBaseUrl =
-          m.api && m.route ? m.route.baseUrl :
-          m.route && explicitRouteApi === modelApi ? explicitRoute?.baseUrl :
-          nativeGoogleBaseUrl ?? nativeAnthropicBaseUrl;
+          nativeAnthropicBaseUrl ?? (m.api && m.route ? m.route.baseUrl :
+            m.route && explicitRouteApi === modelApi ? explicitRoute?.baseUrl : nativeGoogleBaseUrl);
         const spec = {
           id: m.id,
           ...(m.selectedInterface ? { wireId: m.selectedInterface.wireModelId } : {}),

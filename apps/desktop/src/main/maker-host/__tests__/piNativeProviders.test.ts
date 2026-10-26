@@ -436,7 +436,8 @@ describe('buildPiNativeProvidersFromConfigs', () => {
         models: [
           { id: 'chat-model', name: 'Chat Model' },
           { id: 'messages-model', name: 'Messages Model', piApi: 'anthropic-messages' },
-          { id: 'routed-messages', name: 'Routed Messages', piApi: 'anthropic-messages',
+          { id: 'routed-messages', name: 'Routed Messages',
+            api: 'anthropic-messages', piApi: 'anthropic-messages',
             route: { baseUrl: 'http://127.0.0.1:8765/custom-anthropic', wireProtocol: 'anthropic-messages' } },
         ],
       }) },
@@ -451,19 +452,48 @@ describe('buildPiNativeProvidersFromConfigs', () => {
     expect(providers[0].models[0]).not.toHaveProperty('baseUrl');
   });
 
-  it('leaves an OpenAI proxy prefix intact for a Messages model without a route', () => {
+  it('materializes a Messages root for the same-endpoint route saved by the Pi protocol selector', () => {
+    const baseUrl = 'http://127.0.0.1:8765/v1';
+    const { providers } = buildPiNativeProvidersFromConfigs([{
+      id: 'ui-selected-gateway', name: 'UI Selected Gateway', auth: { method: 'none' },
+      runtimes: { pi: piRuntime({
+        baseUrl, wireProtocol: 'openai-chat',
+        models: [
+          { id: 'chat-model', name: 'Chat Model' },
+          { id: 'messages-model', name: 'Messages Model',
+            api: 'anthropic-messages', piApi: 'anthropic-messages',
+            route: { baseUrl, wireProtocol: 'anthropic-messages' } },
+        ],
+      }) },
+    }], () => null);
+
+    expect(providers[0].baseUrl).toBe(baseUrl);
+    expect(providers[0].models[0]).not.toHaveProperty('baseUrl');
+    expect(providers[0].models[1]).toMatchObject({
+      api: 'anthropic-messages', baseUrl: 'http://127.0.0.1:8765',
+    });
+  });
+
+  it('leaves an OpenAI proxy prefix intact for Messages models with or without selector routes', () => {
     const baseUrl = 'https://proxy.example/custom/v1';
     const { providers } = buildPiNativeProvidersFromConfigs([{
       id: 'custom-proxy', name: 'Custom Proxy', auth: { method: 'none' },
       runtimes: { pi: piRuntime({
         baseUrl, wireProtocol: 'openai-chat',
-        models: [{ id: 'messages-model', name: 'Messages Model', piApi: 'anthropic-messages' }],
+        models: [
+          { id: 'messages-model', name: 'Messages Model', piApi: 'anthropic-messages' },
+          { id: 'selected-messages', name: 'Selected Messages',
+            api: 'anthropic-messages', piApi: 'anthropic-messages',
+            route: { baseUrl, wireProtocol: 'anthropic-messages' } },
+        ],
       }) },
     }], () => null);
 
     expect(providers[0].baseUrl).toBe(baseUrl);
     expect(providers[0].models[0]).toMatchObject({ api: 'anthropic-messages' });
     expect(providers[0].models[0]).not.toHaveProperty('baseUrl');
+    expect(providers[0].models[1]).toMatchObject({ api: 'anthropic-messages' });
+    expect(providers[0].models[1]).not.toHaveProperty('baseUrl');
   });
 
   // Tier 2: the actual launch builder must carry a user's V6 selection, including
