@@ -5,12 +5,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { gitExec } from '../../worktree/gitExec';
-import { createWorktree, awaitBackgroundCheckout } from '../../worktree/WorktreeManager';
+import { createWorktree, awaitBackgroundCheckout, getForSession } from '../../worktree/WorktreeManager';
 import { createLogger } from '../../logger';
 import { MAKER_INVOKE } from '../channels';
 import { isDeviceLinkInvoke, runDeviceLinkInvokeContext } from '../../device-link/invoke-context';
 import {
   createWorkerWorktree,
+  resolveWorkerWorktreeSource,
+  getWorkerOwnedWorktree,
   probeWorkerProject,
   readWorkerProjectContext,
 } from '../orcaWorkerProject';
@@ -34,6 +36,7 @@ vi.mock('../../localDb/ipc/recentWorkdirs', () => ({}));
 vi.mock('../../git-context/sessionDirResolver', () => ({}));
 vi.mock('../../worktree/WorktreeManager', () => ({
   createWorktree: vi.fn(),
+  getForSession: vi.fn(),
   awaitBackgroundCheckout: vi.fn(),
 }));
 // Keep the production probe and Git output real; isolate unrelated process/runtime services.
@@ -492,38 +495,94 @@ describe('Worker worktree subproject directory', () => {
       const checkout = new Promise<void>((resolve) => {
         finishCheckout = resolve;
       });
-      vi.mocked(awaitBackgroundCheckout).mockReset().mockReturnValue(checkout);
+      let signalCheckoutStarted!: () => void;
+      const checkoutStarted = new Promise<void>((resolve) => { signalCheckoutStarted = resolve; });
+      vi.mocked(awaitBackgroundCheckout).mockReset().mockImplementation(() => {
+        signalCheckoutStarted();
+        return checkout;
+      });
       const source = scenario === 'root' ? alias : path.join(alias, relative);
       let settled = false;
       const result = createWorkerWorktree(sessionId, source, 'main').then((value) => {
         settled = true;
         return value;
       });
-      if (scenario === 'root') {
-        expect(await result).toBe(target);
-        expect(awaitBackgroundCheckout).not.toHaveBeenCalled();
+      try {
+        if (scenario === 'root') {
+          expect(await result).toBe(target);
+          expect(awaitBackgroundCheckout).not.toHaveBeenCalled();
+          return;
+        }
+        // Windows CI can spend >1s in the real Git probe. Await the actual
+        // boundary (or an early result/failure), not vi.waitFor's 1s deadline.
+        await Promise.race([checkoutStarted, result]);
+        expect(awaitBackgroundCheckout).toHaveBeenCalledWith(sessionId);
+        expect(settled).toBe(false);
+        if (present) {
+          mkdirSync(subproject, { recursive: true });
+          writeFileSync(path.join(subproject, 'AGENTS.md'), 'Checked out rules');
+        }
+        if (scenario === 'external-symlink') {
+          const external = path.join(fixture, 'outside-checkout');
+          mkdirSync(external);
+          mkdirSync(path.dirname(subproject), { recursive: true });
+          symlinkSync(external, subproject, process.platform === 'win32' ? 'junction' : 'dir');
+        }
         finishCheckout();
-        return;
+        expect(await result).toBe(present ? subproject : target);
+        if (scenario === 'missing' || scenario === 'external-symlink')
+          expect(createLogger('test').warn).toHaveBeenCalledWith(
+            'Worker subproject is unavailable within the new worktree; using its root',
+            { sessionId },
+          );
+      } finally {
+        // A failed assertion must not leave a task using the next case's mocks
+        // or the fixture after afterAll removes it.
+        finishCheckout();
+        await result.catch(() => {});
       }
-      await vi.waitFor(() => expect(awaitBackgroundCheckout).toHaveBeenCalledWith(sessionId));
-      expect(settled).toBe(false);
-      if (present) {
-        mkdirSync(subproject, { recursive: true });
-        writeFileSync(path.join(subproject, 'AGENTS.md'), 'Checked out rules');
-      }
-      if (scenario === 'external-symlink') {
-        const external = path.join(fixture, 'outside-checkout');
-        mkdirSync(external);
-        mkdirSync(path.dirname(subproject), { recursive: true });
-        symlinkSync(external, subproject, process.platform === 'win32' ? 'junction' : 'dir');
-      }
-      finishCheckout();
-      expect(await result).toBe(present ? subproject : target);
-      if (scenario === 'missing' || scenario === 'external-symlink')
-        expect(createLogger('test').warn).toHaveBeenCalledWith(
-          'Worker subproject is unavailable within the new worktree; using its root',
-          { sessionId },
-        );
     },
   );
+});
+
+// PR2 unit: validate the tool's optional source before any worktree side effect.
+// UI only supplied a revision; injected probe isolates HEAD states without new Git processes.
+describe('Worker worktree source resolution', () => {
+  const target = {directory: '/repo', exists: true, baseRepo: '/repo', branch: 'main',
+    headState: 'branch' as const, dirty: false, isWorktree: false, commonDir: '/repo/.git', checkoutRoot: '/repo', realDirectory: '/repo'};
+  it.each([
+    {headState: 'branch' as const, branch: 'feature', source: undefined, expected: 'feature'},
+    {headState: 'detached' as const, branch: 'a'.repeat(40), source: undefined, expected: 'a'.repeat(40)},
+    {headState: 'branch' as const, branch: 'main', source: 'release', expected: 'release'},
+    {headState: 'unborn' as const, branch: null, source: 'main', expected: 'main'},
+  ])('resolves $headState with source $source', async ({headState, branch, source, expected}) => {
+    if (source !== undefined) vi.mocked(gitExec).mockResolvedValueOnce({stdout: 'a'.repeat(40) + '\n', stderr: ''});
+    await expect(resolveWorkerWorktreeSource('/repo', source, async () => ({...target, headState, branch}))).resolves.toBe(expected);
+    if (source !== undefined) expect(gitExec).toHaveBeenLastCalledWith(
+      ['rev-parse', '--verify', '--quiet', '--end-of-options', `${source}^{commit}`], '/repo', {timeoutMs: 5000});
+  });
+  it.each([
+    {exists: false}, {baseRepo: null}, {headState: 'unborn' as const, branch: null}, {branch: null},
+  ])('rejects an unavailable target %j', async changes => {
+    await expect(resolveWorkerWorktreeSource('/repo', undefined, async () => ({...target, ...changes}))).rejects.toThrow();
+  });
+  // #6623 P2 (unit): explicit refs need commit verification, not a born current HEAD.
+  // The probe-only cases did not reject an absent ref before creating a worktree.
+  it('rejects an explicit reference with no commit, including an empty repository', async () => {
+    vi.mocked(gitExec).mockRejectedValueOnce(new Error('revision not found'));
+    await expect(resolveWorkerWorktreeSource('/repo', 'missing', async () => ({
+      ...target, headState: 'unborn', branch: null,
+    }))).rejects.toThrow('source_branch must reference an existing commit');
+  });
+  it.each(['', ' ', '-bad', 'bad\nbranch', 'x'.repeat(1025)])('rejects malformed source before probing', async source => {
+    const probe = vi.fn(async () => target);
+    await expect(resolveWorkerWorktreeSource('/repo', source, probe)).rejects.toThrow('source_branch');
+    expect(probe).not.toHaveBeenCalled();
+  });
+  it('projects only metadata registered under the Worker session, not a directory spelling', () => {
+    vi.mocked(getForSession).mockReturnValueOnce({path: '/checkout', branch: 'cindy/new', baseRepo: '/repo'} as never).mockReturnValueOnce(null);
+    expect(getWorkerOwnedWorktree('owned')).toEqual({path: '/checkout', branch: 'cindy/new'});
+    expect(getForSession).toHaveBeenLastCalledWith('owned');
+    expect(getWorkerOwnedWorktree('inherited')).toBeUndefined();
+  });
 });

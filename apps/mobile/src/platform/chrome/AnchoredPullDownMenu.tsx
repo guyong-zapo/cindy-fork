@@ -95,6 +95,7 @@ export function AnchoredPullDownMenu({
   children,
   longPress = false,
   onAction,
+  onPress,
   style,
   testID,
 }: {
@@ -103,6 +104,8 @@ export function AnchoredPullDownMenu({
   children: ReactNode;
   longPress?: boolean;
   onAction(id: string): void;
+  /** longPress 时的短按动作：触发器接管整块触摸，子元素自己的点按收不到，由这里转发。 */
+  onPress?(): void;
   /** 触发器在父布局里的样式(如 flex: 1);外层替子元素占据父布局里的位置。 */
   style?: StyleProp<ViewStyle>;
   testID?: string;
@@ -135,7 +138,7 @@ export function AnchoredPullDownMenu({
         accessibilityValue={child.accessibilityValue}
         collapsable={false}
         onLongPress={longPress ? show : undefined}
-        onPress={longPress ? undefined : show}
+        onPress={longPress ? onPress : show}
         style={({ pressed }) => [style, pressed && styles.triggerPressed]}
         testID={testID}
       >
@@ -351,6 +354,7 @@ function MenuRow({
   const { colors } = useTheme();
   const submenu = !!action.subactions?.length && !action.displayInline;
   const tint = action.destructive ? colors.destructive : colors.textPrimary;
+  const Icon = action.icon;
   return (
     <Pressable
       accessibilityLabel={
@@ -389,6 +393,8 @@ function MenuRow({
             size={iconSize.md}
             strokeWidth={iconStroke.medium}
           />
+        ) : Icon ? (
+          <Icon color={tint} size={iconSize.md} strokeWidth={iconStroke.regular} />
         ) : null}
       </View>
       <View style={styles.rowText}>
