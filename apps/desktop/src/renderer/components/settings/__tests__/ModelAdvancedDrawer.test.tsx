@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BUNDLED_CATALOG, buildUserProvider, resolveModelMetadata } from '@cindy/model-providers';
 import type { CatalogModel, ProviderView } from '@cindy/model-providers';
@@ -8,6 +8,8 @@ const mocks = vi.hoisted(() => ({
   setLimit: vi.fn(async () => {}),
   reset: vi.fn(async () => {}),
   target: vi.fn(),
+  refetch: vi.fn(async () => true),
+  catalogError: null as { reason: 'catalog-unavailable' } | null,
   limit: null as number | null,
 }));
 vi.mock('react-i18next', () => ({
@@ -16,6 +18,9 @@ vi.mock('react-i18next', () => ({
       values?.tokens ? `${key} ${values.tokens}` : key,
     i18n: { resolvedLanguage: 'en' },
   }),
+}));
+vi.mock('@/hooks/useProviders', () => ({
+  useProviders: () => ({ refetch: mocks.refetch, error: mocks.catalogError }),
 }));
 vi.mock('@/hooks/useModelContextLimit', () => ({
   useModelContextLimit: (target: unknown) => {
@@ -49,6 +54,7 @@ import { setModelVisibility } from '@/state/modelVisibilityPrefs';
 import { setProviderModelEffort, getProviderModelEffort, clearProviderModelEffort } from '@/state/providerModelMemory';
 import { appendDiscoveredCustomProviderModels } from '@/lib/customProviders';
 import { buildUnionRows } from '../UnifiedModelList';
+import { modelPricePresentation } from '@/lib/modelPriceFormat';
 
 const model: CatalogModel = {
   id: 'gpt-6',
@@ -98,6 +104,8 @@ afterEach(cleanup);
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.limit = null;
+  mocks.catalogError = null;
+  mocks.refetch.mockReset().mockResolvedValue(true);
   vi.mocked(getProviderModelEffort).mockReset();
 });
 
@@ -217,6 +225,122 @@ describe('model advanced editor', () => {
     } finally { Object.defineProperty(window, 'electronAPI', { configurable: true, value: previous }); }
   });
 
+  // #6601 P1, unit: full-config saves must retain each other's changes.
+  // Prior tests stopped at IPC success; a deferred catalog readback exposes the
+  // stale-prop gap in both orders through the real drawer controls.
+  it.each(['protocol', 'image', 'video'] as const)('preserves alias and %s edits across delayed catalog readbacks', async (kind) => {
+    let stored = { id: 'readback', name: 'Relay', runtimes: { codex: {
+      baseUrl: 'https://relay.example.invalid/v1', wireProtocol: 'openai-responses' as const,
+      ...(kind === 'image' ? { imageApi: 'openai-images' as const } : {}),
+      ...(kind === 'video' ? { videoApi: 'xai-videos' as const } : {}),
+      models: [{ id: 'private', name: 'Private' }],
+    } } } as Parameters<typeof buildUserProvider>[0];
+    let source = { ...buildUserProvider(stored), connected: true } as ProviderView;
+    const update = vi.fn(async (config: typeof stored) => { stored = structuredClone(config); return { ok: true }; });
+    const previous = window.electronAPI;
+    Object.defineProperty(window, 'electronAPI', { configurable: true, value: { maker: { updateCustomProvider: update } } });
+    const page = () => <ModelAdvancedDrawer provider={source} row={buildUnionRows(source)[0]} open
+      onOpenChange={vi.fn()} pricePresentationOf={() => null} onDisable={vi.fn()} disabled={false} paymentRequired={false} />;
+    let finishReadback!: () => void;
+    try {
+      const view = render(page());
+      mocks.refetch.mockImplementation(() => new Promise<boolean>(resolve => { finishReadback = () => {
+        source = { ...buildUserProvider(stored), connected: true } as ProviderView;
+        view.rerender(page());
+        resolve(true);
+      }; }));
+      const controlLabel = kind === 'protocol' ? 'Codex · settings.providers.custom.fields.wireProtocol'
+        : `settings.providers.models.advanced.${kind}Capability.label`;
+      const select = async () => {
+        fireEvent.keyDown(screen.getByRole('button', { name: controlLabel }), { key: 'ArrowDown' });
+        fireEvent.click(await screen.findByRole('menuitemradio', { name: kind === 'protocol' ? 'Chat Completions'
+          : `settings.providers.models.advanced.${kind}Capability.edit` }));
+      };
+      const input = screen.getByRole('textbox', { name: 'settings.providers.models.advanced.displayName' }) as HTMLInputElement;
+      const save = screen.getByRole('button', { name: 'settings.providers.models.advanced.saveName' }) as HTMLButtonElement;
+      await select();
+      fireEvent.change(input, { target: { value: 'Work Alias' } });
+      await waitFor(() => expect(mocks.refetch).toHaveBeenCalledOnce());
+      expect(save.disabled).toBe(true);
+      fireEvent.click(save);
+      expect(update).toHaveBeenCalledOnce();
+      await act(async () => { finishReadback(); });
+      await waitFor(() => expect(save.disabled).toBe(false));
+      const changed = structuredClone(stored.runtimes.codex!.models[0]);
+      fireEvent.click(save);
+      await waitFor(() => expect(mocks.refetch).toHaveBeenCalledTimes(2));
+      expect((screen.getByRole('button', { name: controlLabel }) as HTMLButtonElement).disabled).toBe(true);
+      expect(stored.runtimes.codex!.models[0]).toEqual({ ...changed, name: 'Work Alias', nameExplicit: true });
+      await act(async () => { finishReadback(); });
+      await waitFor(() => expect(input.disabled).toBe(false));
+      await select();
+      await waitFor(() => expect(update).toHaveBeenCalledTimes(3));
+      expect(stored.runtimes.codex!.models[0]).toMatchObject({ name: 'Work Alias', nameExplicit: true });
+      await act(async () => { finishReadback(); });
+    } finally { Object.defineProperty(window, 'electronAPI', { configurable: true, value: previous }); }
+  });
+
+  // A false read can mean a superseding round, before any global catalog error.
+  // Unit: keep a successful rename's stale prop locked until the new snapshot.
+  it('blocks stale-config writes after an unconfirmed rename readback', async () => {
+    const config = { id: 'unconfirmed', name: 'Relay', runtimes: { codex: {
+      baseUrl: 'https://relay.example.invalid/v1', models: [{ id: 'private', name: 'Private' }],
+    } } };
+    const source = { ...buildUserProvider(config), connected: true } as ProviderView;
+    const update = vi.fn(async (..._args: unknown[]) => ({ ok: true }));
+    const previous = window.electronAPI;
+    Object.defineProperty(window, 'electronAPI', { configurable: true, value: { maker: { updateCustomProvider: update } } });
+    const page = (provider: ProviderView) => <ModelAdvancedDrawer provider={provider} row={buildUnionRows(provider)[0]} open
+      onOpenChange={vi.fn()} pricePresentationOf={() => null} onDisable={vi.fn()} disabled={false} paymentRequired={false} />;
+    mocks.refetch.mockResolvedValue(false);
+    try {
+      const view = render(page(source));
+      const input = screen.getByRole('textbox', { name: 'settings.providers.models.advanced.displayName' }) as HTMLInputElement;
+      const save = screen.getByRole('button', { name: 'settings.providers.models.advanced.saveName' }) as HTMLButtonElement;
+      fireEvent.change(input, { target: { value: 'Work Alias' } });
+      fireEvent.click(save);
+      await waitFor(() => expect(input.disabled).toBe(false));
+      fireEvent.change(input, { target: { value: 'Next Alias' } });
+      expect(save.disabled).toBe(true);
+      fireEvent.click(save);
+      expect(update).toHaveBeenCalledOnce();
+      const protocol = screen.getByRole('button', { name: 'Codex · settings.providers.custom.fields.wireProtocol' }) as HTMLButtonElement;
+      expect(protocol.disabled).toBe(true);
+      const active = { ...buildUserProvider(update.mock.calls[0]![0] as typeof config), connected: true } as ProviderView;
+      view.rerender(page(active));
+      expect(input.value).toBe('Next Alias');
+      expect(save.disabled).toBe(false);
+      expect(protocol.disabled).toBe(false);
+    } finally { Object.defineProperty(window, 'electronAPI', { configurable: true, value: previous }); }
+  });
+
+  // #6601 P2, unit: the persisted metadata contract counts UTF-16 units.
+  // Existing rename coverage has only short names; 129 emoji must never reach
+  // persistence, while 128 emoji is the valid boundary.
+  it('rejects names over 256 UTF-16 units and saves the valid boundary', async () => {
+    const source = { ...buildUserProvider({ id: 'length', name: 'Relay', runtimes: { codex: {
+      baseUrl: 'https://relay.example.invalid/v1', models: [{ id: 'private', name: 'Private' }],
+    } } }), connected: true } as ProviderView;
+    const update = vi.fn(async (..._args: unknown[]) => ({ ok: true }));
+    const previous = window.electronAPI;
+    Object.defineProperty(window, 'electronAPI', { configurable: true, value: { maker: { updateCustomProvider: update } } });
+    try {
+      render(<ModelAdvancedDrawer provider={source} row={buildUnionRows(source)[0]} open
+        onOpenChange={vi.fn()} pricePresentationOf={() => null} onDisable={vi.fn()} disabled={false} paymentRequired={false} />);
+      const input = screen.getByRole('textbox', { name: 'settings.providers.models.advanced.displayName' }) as HTMLInputElement;
+      const save = screen.getByRole('button', { name: 'settings.providers.models.advanced.saveName' }) as HTMLButtonElement;
+      fireEvent.change(input, { target: { value: '😀'.repeat(129) } });
+      expect(save.disabled).toBe(true);
+      fireEvent.click(save);
+      expect(update).not.toHaveBeenCalled();
+      expect(input.maxLength).toBe(256);
+      fireEvent.change(input, { target: { value: '😀'.repeat(128) } });
+      fireEvent.click(save);
+      await waitFor(() => expect(update).toHaveBeenCalledOnce());
+      expect(update.mock.calls[0]![0]).toMatchObject({ runtimes: { codex: { models: [{ name: '😀'.repeat(128), nameExplicit: true }] } } });
+    } finally { Object.defineProperty(window, 'electronAPI', { configurable: true, value: previous }); }
+  });
+
   it.each(['builtin', 'organization', 'native', 'cindy-local-ollama', 'cindy-local-llamacpp'])('does not offer personal model renaming for %s providers', (kind) => {
     const source = { ...buildUserProvider({ id: kind, name: kind, runtimes: { codex: { baseUrl: 'https://example.invalid/v1', models: [{ id: 'gpt-6', name: 'GPT-6' }] } } }), connected: true } as ProviderView;
     if (kind === 'builtin' || kind === 'organization') source.source = kind;
@@ -261,7 +385,10 @@ describe('model advanced editor', () => {
   });
 
   it.each(['generate', 'edit', 'default'] as const)('saves image capability %s only on the explicit Images connection', async (value) => {
-    const update = vi.fn(async (..._args: unknown[]) => ({ ok: true }));
+    const update = vi.fn(async (...args: unknown[]) => {
+      void args;
+      return { ok: true };
+    });
     const previous = window.electronAPI;
     Object.defineProperty(window, 'electronAPI', { configurable: true, value: { maker: { updateCustomProvider: update } } });
     const source = { ...buildUserProvider({ id: 'relay', name: 'Relay', auth: { method: 'apiKey' }, runtimes: {
@@ -298,7 +425,10 @@ describe('model advanced editor', () => {
     } finally { Object.defineProperty(window, 'electronAPI', { configurable: true, value: previous }); }
   });
   it.each(['generate', 'edit', 'default'] as const)('saves video capability %s only on the explicit video connection', async (value) => {
-    const update = vi.fn(async (..._args: unknown[]) => ({ ok: true }));
+    const update = vi.fn(async (...args: unknown[]) => {
+      void args;
+      return { ok: true };
+    });
     const previous = window.electronAPI;
     Object.defineProperty(window, 'electronAPI', { configurable: true, value: { maker: { updateCustomProvider: update } } });
     const source = { ...buildUserProvider({ id: 'relay', name: 'Relay', auth: { method: 'apiKey' }, runtimes: {
@@ -397,7 +527,10 @@ describe('model advanced editor', () => {
   });
 
   it('saves protocol selection to the selected engine and model without writing derived model limits', async () => {
-    const update = vi.fn(async (..._args: unknown[]) => ({ ok: true }));
+    const update = vi.fn(async (...args: unknown[]) => {
+      void args;
+      return { ok: true };
+    });
     const previous = window.electronAPI;
     Object.defineProperty(window, 'electronAPI', { configurable: true, value: { maker: { updateCustomProvider: update } } });
     const source = { ...buildUserProvider({ id: 'fixture', name: 'Fixture', runtimes: {
@@ -418,8 +551,34 @@ describe('model advanced editor', () => {
     } finally { Object.defineProperty(window, 'electronAPI', { configurable: true, value: previous }); }
   });
 
+  // V6 selection is a user intent, not a copy of today's resolved route/limits.
+  it.each(['auto', 'moonshot-kimi-code-openai-responses'])('persists Kimi interface %s without locking catalog defaults', async (interfaceId) => {
+    const update = vi.fn(async (...args: unknown[]) => {
+      void args;
+      return { ok: true };
+    });
+    const previous = window.electronAPI;
+    Object.defineProperty(window, 'electronAPI', { configurable: true, value: { maker: { updateCustomProvider: update } } });
+    const source = { ...buildUserProvider({ id: 'kimi-user', name: 'Kimi', runtimes: {
+      codex: { catalogPresetId: 'moonshot-kimi-code', baseUrl: 'https://api.kimi.com/coding/v1', wireProtocol: 'openai-chat',
+        models: [{ id: 'k3.1-pro', name: 'K3.1', interfaceId: 'moonshot-kimi-code-openai-completions' }] },
+    } }), connected: true } as ProviderView;
+    try {
+      render(drawer(source.models.codex![0], 'high', ['high'], source));
+      fireEvent.keyDown(screen.getByRole('button', { name: 'Codex · settings.providers.custom.fields.wireProtocol' }), { key: 'ArrowDown' });
+      fireEvent.click(await screen.findByRole('menuitemradio', { name: interfaceId === 'auto' ? 'settings.providers.models.advanced.protocol.automatic' : 'Responses' }));
+      await waitFor(() => expect(update).toHaveBeenCalledOnce());
+      const config = update.mock.calls[0]![0] as Parameters<typeof buildUserProvider>[0];
+      expect(config.runtimes.codex!.models).toEqual([{ id: 'k3.1-pro', name: 'K3.1', interfaceId }]);
+      expect(buildUserProvider(config).models.codex![0].selectedInterface?.api).toBe('openai-responses');
+    } finally { Object.defineProperty(window, 'electronAPI', { configurable: true, value: previous }); }
+  });
+
   it('saves Google selection with its matching wire and official endpoint', async () => {
-    const update = vi.fn(async (..._args: unknown[]) => ({ ok: true }));
+    const update = vi.fn(async (...args: unknown[]) => {
+      void args;
+      return { ok: true };
+    });
     const previous = window.electronAPI;
     Object.defineProperty(window, 'electronAPI', { configurable: true, value: { maker: { updateCustomProvider: update } } });
     const source = { ...buildUserProvider({ id: 'fixture', name: 'Fixture', runtimes: {
@@ -793,6 +952,14 @@ describe('model advanced editor', () => {
     expect(input.getAttribute('aria-invalid')).toBe('true');
   });
 
+  it('keeps the saved primary effort when another harness has a different default', () => {
+    vi.mocked(getProviderModelEffort).mockImplementation((agent) => agent === 'codex' ? 'max' : undefined);
+    draw({ ...model, efforts: ['low', 'high', 'max'], defaultEffort: 'low' }, 'low');
+
+    expect(screen.getByRole('radio', { name: 'effortLevels.max' }).getAttribute('aria-checked'))
+      .toBe('true');
+  });
+
   it('retains a mixed saved selection without showing per-engine default labels', () => {
     draw(model, 'low');
     expect(screen.getByText('settings.providers.models.advanced.effortMixed')).toBeTruthy();
@@ -893,4 +1060,96 @@ it('keeps enterprise reference prices read-only in the model drawer', () => {
   expect(
     screen.queryByRole('button', { name: 'settings.providers.models.priceOverride.menu' }),
   ).toBeNull();
+});
+
+// Unit contract: drawer summary must show translated roles while retaining supplier conditions below.
+// Previous drawer tests had no displayPricing; one input quote previously showed only the English table.
+it.each([{ hasSummary: true, withNotes: true }, { hasSummary: true, withNotes: false }, { hasSummary: false, withNotes: false }])('keeps supplementary items when they do not match the summary: %j', ({ hasSummary, withNotes }) => {
+  const quote = { price: 0.02, unit: 'image', quantity: 1 };
+  const summary = { input: [quote, { price: 140, unit: 'character', quantity: 1000000 }],
+    output: [{ ...quote, price: 6, maxPrice: 10, tier: '480P/720P' }],
+    cacheRead: [quote], cacheWrite: [quote] };
+  draw({ ...model, currency: 'CNY', costDiscount: 0.2, displayPricing: {
+    items: [{ ...quote, label: 'Supplier-specific charge' }], ...(withNotes ? { notes: ['Provider billing condition'] } : {}),
+    ...(hasSummary ? { summary } : {}),
+  } });
+  expect(screen.getByText('Supplier-specific charge')).toBeTruthy();
+  if (withNotes) expect(screen.getByText('Provider billing condition')).toBeTruthy();
+  if (!hasSummary) {
+    expect(screen.queryByText('settings.providers.models.advanced.price.input')).toBeNull();
+    return;
+  }
+  const input = screen.getByText('settings.providers.models.advanced.price.input').parentElement!;
+  expect(input.textContent).toContain('¥0.016');
+  expect(input.textContent).not.toContain(' · ');
+  expect(input.textContent).toContain('¥112');
+  expect(input.querySelector('s')?.textContent).toBe('¥0.02');
+  const output = screen.getByText('settings.providers.models.advanced.price.output').parentElement!;
+  expect(screen.getByText('480P/720P')).toBeTruthy();
+  expect(output.textContent).toContain('¥4.8–¥8');
+  expect(output.querySelector('s')?.textContent).toBe('¥6–¥10');
+  expect(screen.getByText('settings.providers.models.advanced.price.cacheRead')).toBeTruthy();
+  expect(screen.getByText('settings.providers.models.advanced.price.cacheCreate')).toBeTruthy();
+  expect(output.compareDocumentPosition(screen.getByText('Supplier-specific charge')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});
+
+// Unit: a plain speech table used to repeat the primary quote; notes must still keep the table visible.
+it.each([false, true])('omits only a fully redundant supplementary table (notes=%s)', withNotes => {
+  const quote = { price: 140, unit: 'character', quantity: 1000000 };
+  draw({ ...model, currency: 'CNY', displayPricing: {
+    items: [{ ...quote, label: 'Text input' }], summary: { input: [quote] },
+    ...(withNotes ? { notes: ['Provider billing condition'] } : {}),
+  } });
+  expect(screen.getByText('settings.providers.models.advanced.price.input').parentElement!.textContent).toContain('¥140');
+  expect(screen.queryByText('Text input') !== null).toBe(withNotes);
+  expect(screen.queryByText('Provider billing condition') !== null).toBe(withNotes);
+});
+
+// Unit regression: the real drawer hid the discount row for displayPricing models.
+// Existing summary tests checked discounted amounts but not the separate discount row.
+// Minimal failure: one video quote with costDiscount=0.4 and no token price presentation.
+// Discount-order regression: the row must follow summary quotes and precede supplementary items.
+it.each([
+  { costDiscount: 0.4, pricing: 'summary', expected: '↓40%' },
+  { costDiscount: 0.4, pricing: 'table', expected: '↓40%' },
+  { costDiscount: 0.4, pricing: 'chat', expected: '↓40%' },
+  { costDiscount: 1, pricing: 'summary', expected: '↓100%' },
+  ...[undefined, 0, -0.1, 1.1, NaN].map(costDiscount => ({ costDiscount, pricing: 'summary', expected: null })),
+])('shows a discount row only for valid model discounts: %j', ({ costDiscount, pricing, expected }) => {
+  const quote = { price: 0.05, maxPrice: 0.2, unit: 'second', quantity: 1 };
+  draw({ ...model, currency: 'CNY', costDiscount,
+    ...(pricing === 'chat' ? {} : { displayPricing: {
+      items: [{ label: 'Generated video', price: 0.05, unit: 'second', quantity: 1 }],
+      ...(pricing === 'summary' ? { summary: { output: [quote] } } : {}),
+    } }),
+  });
+  const label = screen.queryByText('settings.providers.models.advanced.discount');
+  if (expected) {
+    expect(label?.parentElement?.textContent).toContain(expected);
+    if (pricing !== 'chat') {
+      expect(label!.compareDocumentPosition(screen.getByText('Generated video')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    }
+    if (pricing === 'summary') {
+      const outputRow = screen.getByText('settings.providers.models.advanced.price.output').parentElement!;
+      expect(outputRow.nextElementSibling).toBe(label!.parentElement);
+    }
+  } else expect(label).toBeNull();
+});
+
+// Unit regression found during review: ordinary Gateway chat projections carry effective cost,
+// not costDiscount. Direct-field cases above cannot cover the existing inferred-discount path.
+it('retains the chat discount inferred from standard and effective prices', () => {
+  const primary = { ...model, cost: { input: 1.2, output: 6 } };
+  render(<ModelAdvancedDrawer
+    provider={{ ...provider, id: 'xd' }}
+    row={{ id: primary.id, name: primary.name, avail: ['codex'], byAgent: { codex: primary } }}
+    open onOpenChange={vi.fn()} onDisable={vi.fn()} disabled={false} paymentRequired={false}
+    pricePresentationOf={() => modelPricePresentation({
+      providerId: 'xd', modelId: primary.id, source: 'gateway', approximate: false,
+      currency: 'CNY', inputPerMtok: 2, outputPerMtok: 10,
+    }, primary.cost)}
+  />);
+  expect(screen.getByText('settings.providers.models.advanced.discount').parentElement?.textContent).toContain('↓40%');
+  const outputRow = screen.getByText('settings.providers.models.advanced.price.output').parentElement!;
+  expect(outputRow.nextElementSibling).toBe(screen.getByText('settings.providers.models.advanced.discount').parentElement);
 });

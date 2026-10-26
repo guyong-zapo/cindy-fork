@@ -22,6 +22,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { permissionModeOrAsk } from '@cindy/maker-shared/permission-mode';
 import { AUTO_REVIEW_SOURCE_CONTENT, AUTO_REVIEW_USER_INTENT, AUTO_REVIEW_DELEGATED_CONTINUATION, TurnDispatchRejectedError, type SendOptions } from '@cindy/maker-core';
 import { restoreAutoReviewUserIntent } from '../autoReviewUserIntent.js';
+import { verifiedOwnerRequestText } from '../../../shared/forwardedRequest.js';
 
 const registerSource = readFileSync(resolve(__dirname, '..', 'register.ts'), 'utf8').replace(
   /\r\n?/g,
@@ -100,6 +101,7 @@ function botTaskDispatchSlice(): string {
   const lockReturn = 'return trackSendToSessionLockRun(targetSessionId, run, () => lockStage);';
   const sendToSessionInternal =
     slice('async function sendToSessionInternal(params: {', lockReturn) + `${lockReturn}\n}`;
+  const sendWithBaseline = slice('async function sendUserMessageWithAwaitedGitBaseline(', '\n  /**\n   * 来源标签用的发送方身份快照');
   const dispatchBotSessionMessage = slice(
     'const dispatchBotSessionMessage = async (params: {',
     '\n  setBotInvitationWelcomeDispatch(dispatchBotSessionMessage);',
@@ -110,10 +112,11 @@ function botTaskDispatchSlice(): string {
     registerSource.indexOf('botDelegationServiceHolder = createBotDelegationService({'),
   );
   return ts.transpileModule(
-    `${sendToSessionInternal}
+    `${sendWithBaseline}
+${sendToSessionInternal}
 ${dispatchBotSessionMessage}
 const delegationDispatch = ${delegationDispatch};
-return { delegationDispatch, dispatchBotSessionMessage };`,
+return { delegationDispatch, dispatchBotSessionMessage, sendToSessionInternal };`,
     { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } },
   ).outputText;
 }
@@ -124,6 +127,7 @@ const loadBotTaskDispatch = new Function(
   'scope',
   `with (scope) { return (function () { ${botTaskDispatchSlice()} })(); }`,
 ) as (scope: object) => {
+  sendToSessionInternal: (input: Record<string, unknown>) => Promise<{ ok: boolean; wakeKind?: string }>;
   dispatchBotSessionMessage: (input: Record<string, unknown>) => Promise<{ ok: boolean; wakeKind?: string }>;
   delegationDispatch: (
     input: Record<string, unknown>,
@@ -144,6 +148,24 @@ function botTaskDispatchHarness(
   }]);
   const noop = () => undefined;
   const asyncNoop = async () => undefined;
+  const activity = new Map<string, number>();
+  const touchSessionActivityInDb = vi.fn(async (id: string) => { activity.set(id, Date.now()); });
+  const sendFor = (session: { id: string }) => async (
+    _message: unknown,
+    opts: SendOptions & { onAccepted?: () => Promise<void>; onDispatching?: () => void },
+  ) => {
+    sendOptions.push(opts);
+    await opts.onAccepted?.();
+    try { opts.onDispatching?.(); } catch (error) {
+      if (error instanceof TurnDispatchRejectedError) return { accepted: false, reason: 'provider-rejected-before-dispatch' };
+      throw error;
+    }
+    sentTo.push({ sessionId: session.id, planMode: opts.planMode });
+    return { accepted: true };
+  };
+  for (const [id, session] of Object.entries(live)) {
+    if (!('send' in session)) Object.assign(session, { send: sendFor({ id }) });
+  }
   const dbChain = {
     from: () => dbChain,
     innerJoin: () => dbChain,
@@ -151,9 +173,24 @@ function botTaskDispatchHarness(
     limit: async () => [],
   };
   const stubs: Record<string, unknown> = {
+    touchSessionActivityInDb,
+    assertCindyMakeSessionAvailable: noop,
+    readSessionSource: asyncNoop,
+    prepareUpstreamMergeTurn: noop,
+    isCindyMakeWorktreePath: () => false,
+    app: { getPath: () => '/fixture' },
+    agentHandoffPending: { peek: asyncNoop },
+    shouldPrependMobileClientPromptNote: () => false,
+    noteChannelTurnSource: () => noop,
+    channelTurnSourceFor: noop,
+    beginTurnChangeSetAtDispatch: asyncNoop,
+    clearPendingTurnChangeSets: noop,
+    gitSnapshotCoordinator: null,
+    deferredProductTurnFailureGate: { clearSession: noop },
+    withCindyMakeProjectUse: (_root: string, _workdir: string, dispatch: () => Promise<unknown>) => dispatch(),
     assertTaskActionCurrent, hasTaskActionAuthorization, TurnDispatchRejectedError,
     AUTO_REVIEW_SOURCE_CONTENT, AUTO_REVIEW_USER_INTENT, AUTO_REVIEW_DELEGATED_CONTINUATION,
-    restoreAutoReviewUserIntent, readAutoReviewHistory,
+    restoreAutoReviewUserIntent, readAutoReviewHistory, verifiedOwnerRequestText,
     maker: {
       getSession: (id: string) => live[id],
       getSessionMeta: async (id: string) => ({
@@ -212,24 +249,9 @@ function botTaskDispatchHarness(
     ensureRemoteReadyForSessionStart: asyncNoop,
     bootstrapSession: async (opts: Record<string, unknown>) => {
       bootstrapped.push(opts);
-      return { session: { id: opts.id, agentKind: opts.agentKind } };
+      return { session: { id: opts.id, agentKind: opts.agentKind, send: sendFor({ id: opts.id as string }) } };
     },
     markOrcaRoleIfNeeded: asyncNoop,
-    sendUserMessageWithAwaitedGitBaseline: async (
-      session: { id: string },
-      _message: string,
-      _clientId: string,
-      opts: SendOptions & { onAccepted?: () => Promise<void>; onDispatching?: () => void },
-    ) => {
-      sendOptions.push(opts);
-      await opts.onAccepted?.();
-      try { opts.onDispatching?.(); } catch (error) {
-        if (error instanceof TurnDispatchRejectedError) return { accepted: false, reason: 'provider-rejected-before-dispatch' };
-        throw error;
-      }
-      sentTo.push({ sessionId: session.id, planMode: opts.planMode });
-      return { accepted: true };
-    },
     assertDesktopSendDispatched: noop,
     isSessionRunningError: () => false,
     GroupToolAuthorizationError: class extends Error {},
@@ -245,8 +267,17 @@ function botTaskDispatchHarness(
       throw new ReferenceError(`unstubbed dependency of the production slice: ${String(key)}`);
     },
   });
-  return { ...loadBotTaskDispatch(scope), bootstrapped, sentTo, sendOptions, readAutoReviewHistory };
+  return { ...loadBotTaskDispatch(scope), bootstrapped, sentTo, sendOptions, readAutoReviewHistory, activity, touchSessionActivityInDb };
 }
+
+it('advances an accepted send_to_session with a dispatcher without touching human-send time', async () => {
+  const row = { permissionMode: 'auto', planModeEnabled: false, userSendAt: 123 };
+  const current = botTaskDispatchHarness({ child: row }, { child: { id: 'child', agentKind: 'codex' } });
+  const result = await current.sendToSessionInternal({ targetSessionId: 'child', message: 'Take over this work', dispatcherSessionId: 'lead' });
+  expect(result).toMatchObject({ ok: true });
+  expect(current.activity.get('child')).toBeGreaterThan(123);
+  expect(row.userSendAt).toBe(123);
+});
 
 // #6895 review: the cloud-room dispatcher bypassed the ordinary send transaction.
 // Execute that production closure with the real restore scope (unit behavior in
@@ -323,9 +354,10 @@ describe('companion internal delivery after automation', () => {
     let current = { ...saved, agentKind: 'codex' as 'codex' | 'pi', model: 'temporary-model' };
     let baseline: string | null = JSON.stringify({ ...saved, scopeId: 'automation' });
     const live: Record<string, object> = {};
-    const makeLive = () => ({ id: 'child', ...current, isTurnRunning: () => false, getStatus: () => 'active' });
-    if (path === 'live') live.child = makeLive();
     let dispatchedModel: string | undefined;
+    const makeLive = () => ({ id: 'child', ...current, isTurnRunning: () => false, getStatus: () => 'active',
+      send: async () => { dispatchedModel = current.model; return { accepted: true }; } });
+    if (path === 'live') live.child = makeLive();
     const scope = createScheduledModelScope({
       createId: () => 'unused', read: async () => ({ profile: current, baseline }),
       write: async (_id, value) => { baseline = value ? JSON.stringify(value) : null; },
@@ -335,8 +367,8 @@ describe('companion internal delivery after automation', () => {
     const h = botTaskDispatchHarness({ child: { permissionMode: 'auto', planModeEnabled: false } }, live, {
       scheduledModelScope: scope,
       maker: { getSession: (id: string) => live[id], getSessionMeta: async () => ({ id: 'child', ...current, workDir: '/tmp/fixture/child' }) },
-      bootstrapSession: async (opts: Record<string, unknown>) => ({ session: { id: 'child', model: opts.model } }),
-      sendUserMessageWithAwaitedGitBaseline: async (session: { model: string }) => { dispatchedModel = session.model; return { accepted: true }; },
+      bootstrapSession: async (opts: Record<string, unknown>) => ({ session: { id: 'child', model: opts.model,
+        send: async () => { dispatchedModel = String(opts.model); return { accepted: true }; } } }),
     });
     const result = await h.dispatchBotSessionMessage({ targetSessionId: 'child', message: 'Next owner message', clientId: 'cloud-room:next' });
     expect(result.ok).toBe(true);
@@ -375,6 +407,23 @@ describe('idle forwarded request authorization', () => {
       expect(opts[AUTO_REVIEW_DELEGATED_CONTINUATION]).toBe(true);
       expect(h.readAutoReviewHistory).toHaveBeenCalledWith('child');
     }
+  });
+
+  // Incident 2026-10-23: the owner's relayed "可以提交 pr" reached the task with an empty
+  // review intent. A relay the sending host verified carries exactly the owner's words.
+  it.each(['live', 'resumed'] as const)('%s dispatch reviews a verified owner relay against the owner words', async path => {
+    const live: Record<string, object> = path === 'live' ? { child: {
+      id: 'child', agentKind: 'claude-code', remoteHostId: null,
+      isTurnRunning: () => false, getStatus: () => 'active',
+    } } : {};
+    const h = botTaskDispatchHarness({ child: { permissionMode: 'auto', planModeEnabled: false } }, live);
+    await h.delegationDispatch({
+      targetSessionId: 'child', message: 'envelope', clientId: 'verified-relay',
+      autoReviewUserText: { kind: 'agent-request', request: {
+        userText: 'Submit the PR.', sessionId: 'source', clientId: 'owner-input', ownerVerified: true } },
+    });
+    expect(h.sendOptions[0]?.[AUTO_REVIEW_USER_INTENT]).toBe('Submit the PR.');
+    expect(h.readAutoReviewHistory).not.toHaveBeenCalled();
   });
 });
 

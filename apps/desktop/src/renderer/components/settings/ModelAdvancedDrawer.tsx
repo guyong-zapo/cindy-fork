@@ -1,4 +1,5 @@
-import { DisplayPricingDetails } from '@/components/DisplayPricingDetails';
+import { isDisplayPricingTableRedundant } from '@/lib/displayPricingFormat';
+import { DisplayPricingDetails, DisplayPricingQuote } from '@/components/DisplayPricingDetails';
 import { Button } from '@/components/ui/button';
 import { FormField } from '@/components/ui/form-field';
 import { localizedModelDescription } from '@/lib/modelDescriptions';
@@ -38,6 +39,7 @@ import { Switch } from '@/components/ui/switch';
 import { ClaudeMark } from '@/components/icons/ClaudeMark';
 import { CodexMark } from '@/components/icons/CodexMark';
 import { PiMark } from '@/components/icons/PiMark';
+import { useProviders } from '@/hooks/useProviders';
 import { useModelContextLimit } from '@/hooks/useModelContextLimit';
 import { modelPriceDetailRows, type ModelPricePresentation } from '@/lib/modelPriceFormat';
 import {
@@ -217,6 +219,17 @@ export function ModelAdvancedDrawer({
   refreshing = false,
 }: Props) {
   const { t, i18n } = useTranslation();
+  const { refetch, error: catalogError } = useProviders();
+  const latestProviderRef = useRef(provider);
+  latestProviderRef.current = provider;
+  const [unconfirmedProvider, setUnconfirmedProvider] = useState<ProviderView | null>(null);
+  const configurationBlocked = refreshing || !!catalogError || unconfirmedProvider === provider;
+  // IPC success precedes the provider-change broadcast's asynchronous catalog
+  // read. Keep every whole-config writer locked until that read completes. A
+  // failed/superseded read stays blocked until a new snapshot replaces the prop.
+  const readBackConfig = async () => {
+    if (!await refetch()) setUnconfirmedProvider(latestProviderRef.current);
+  };
   const selectionAvailable = provider.connected && !provider.suspended;
   const locale = i18n.resolvedLanguage ?? i18n.language ?? 'en';
   const [priceDialogOpen, setPriceDialogOpen] = useState(false);
@@ -307,8 +320,8 @@ export function ModelAdvancedDrawer({
   }, [primaryModel?.name]);
   const saveModelName = async () => {
     const name = nameDraft.trim();
-    if (!canEditName || !row || !name || !nameDirtyRef.current ||
-        refreshing || nameSavingRef.current || protocolSaving || imageCapabilitySaving) return;
+    if (!canEditName || !row || !name || name.length > 256 || !nameDirtyRef.current ||
+        configurationBlocked || nameSavingRef.current || protocolSaving || imageCapabilitySaving) return;
     const config = providerViewToCustomProviderConfig(provider);
     // A union row can contain different IDs on each engine. Never match by its
     // canonical ID or display name, and preserve the original per-model config.
@@ -325,6 +338,7 @@ export function ModelAdvancedDrawer({
     const editorVersion = nameEditorVersionRef.current;
     try {
       const result = await updateCustomProvider(config, {}, { source: 'manual-settings' });
+      if (result.ok) await readBackConfig();
       // The parent can replace/close the drawer while persistence is pending.
       if (editorVersion !== nameEditorVersionRef.current) return;
       if (result.ok) {
@@ -357,7 +371,7 @@ export function ModelAdvancedDrawer({
   const setImageCapability = async (value: string, kind: 'image' | 'video' = 'image') => {
     const agent = kind === 'image' ? imageAgent : videoAgent;
     const sourceModel = kind === 'image' ? imageModel : videoModel;
-    if (nameSavingRef.current || imageCapabilitySaving || !agent || !sourceModel || !['default', 'generate', 'edit'].includes(value)) return;
+    if (configurationBlocked || nameSavingRef.current || protocolSaving || imageCapabilitySaving || !agent || !sourceModel || !['default', 'generate', 'edit'].includes(value)) return;
     const config = providerViewToCustomProviderConfig(provider);
     const model = config.runtimes[agent]?.models.find(item => item.id === sourceModel.id);
     if (!model) return;
@@ -371,31 +385,39 @@ export function ModelAdvancedDrawer({
     setImageCapabilitySaving(true);
     try {
       const result = await updateCustomProvider(config, {}, { source: 'manual-settings' });
-      if (!result.ok) toast.error(t('settings.providers.custom.toast.saveFailed'));
+      if (result.ok) await readBackConfig();
+      else toast.error(t('settings.providers.custom.toast.saveFailed'));
     } catch { toast.error(t('settings.providers.custom.toast.saveFailed')); }
     finally { setImageCapabilitySaving(false); }
   };
-  const setModelApi = async (agent: AgentKind, api: PiModelApi) => {
-    if (nameSavingRef.current || protocolSaving || !canEditProtocol || !row?.byAgent[agent]) return;
+  const setModelApi = async (agent: AgentKind, api: string) => {
+    if (configurationBlocked || nameSavingRef.current || protocolSaving || imageCapabilitySaving || !canEditProtocol || !row?.byAgent[agent]) return;
     const config = providerViewToCustomProviderConfig(provider);
     const runtime = config.runtimes[agent];
     const model = runtime?.models.find(m => m.id === row.byAgent[agent]!.id);
     if (!runtime || !model) return;
-    model.api = api;
-    if (agent === 'pi') model.piApi = api;
-    const wire = providerWireProtocolForApi(api);
-    if (!wire) return;
-    const existingRoute = { ...(model.route ?? {}) };
-    delete existingRoute.requestPath;
-    model.route = {
-      ...existingRoute,
-      baseUrl: providerBaseUrlForApi(model.route?.baseUrl ?? runtime.baseUrl, api),
-      wireProtocol: wire,
-    };
+    const choice = row.byAgent[agent]?.availableInterfaces?.find(item => item.profileId === api);
+    if (api === 'auto' || choice) {
+      model.interfaceId = api;
+      delete model.api;
+      delete model.piApi;
+      delete model.route;
+    } else {
+      delete model.interfaceId;
+      model.api = api as PiModelApi;
+      if (agent === 'pi') model.piApi = api as PiModelApi;
+      const wire = providerWireProtocolForApi(api);
+      if (!wire) return;
+      model.route = {
+        baseUrl: providerBaseUrlForApi(model.route?.baseUrl ?? runtime.baseUrl, api),
+        wireProtocol: wire,
+      };
+    }
     setProtocolSaving(true);
     try {
       const result = await updateCustomProvider(config, {}, { source: 'manual-settings' });
-      if (!result.ok) toast.error(t('settings.providers.custom.toast.saveFailed'));
+      if (result.ok) await readBackConfig();
+      else toast.error(t('settings.providers.custom.toast.saveFailed'));
     }
     catch { toast.error(t('settings.providers.custom.toast.saveFailed')); }
     finally { setProtocolSaving(false); }
@@ -492,6 +514,10 @@ export function ModelAdvancedDrawer({
   );
   const description = localizedModelDescription(primaryModel, t);
   const price = pricePresentationOf(primaryAgent, primaryModel);
+  // Ordinary Gateway chat models carry effective cost; keep their inferred discount.
+  const discount =
+    (!primaryModel.displayPricing && price?.kind === 'priced' ? price.discount : undefined) ??
+    primaryModel.costDiscount;
   const protocols = modelProtocolComparison(provider, row.byAgent);
   const protocolLabel = (api: PiModelApi | null) =>
     api ? MODEL_PROTOCOL_LABEL[api] ?? null : t('settings.providers.models.advanced.undeclared');
@@ -520,8 +546,7 @@ export function ModelAdvancedDrawer({
     ? getProviderModelEffort(primaryAgent, provider.id, primaryModel.id) ?? primaryModel.defaultEffort
     : null;
   const effortMixed = efforts.length > 0 && commonEfforts.length === 0;
-  const currentEffort = preferredEffort && commonEfforts.some((effort) => effort === preferredEffort)
-    ? preferredEffort : commonEfforts[0] ?? null;
+  const currentEffort = preferredEffort ?? commonEfforts[0] ?? null;
   const shownEfforts = EFFORT_ORDER.filter((effort) =>
     chatAgents.some((agent) => {
       const model = row.byAgent[agent];
@@ -668,19 +693,22 @@ export function ModelAdvancedDrawer({
                                   id={protocolId}
                                   className="mt-0.5 text-11 leading-4 text-[var(--text-tertiary)]"
                                 >
-                                  {canEditProtocol && !model?.catalogPresetId && supported ? (
+                                  {canEditProtocol && (!model?.catalogPresetId || !!model.availableInterfaces?.length) && supported ? (
                                     <DropdownMenu>
                                       <DropdownMenuTrigger asChild>
-                                        <button type="button" disabled={protocolSaving || nameSaving}
+                                        <button type="button" disabled={configurationBlocked || protocolSaving || imageCapabilitySaving || nameSaving}
                                           aria-label={`${AGENT_LABEL[agent]} · ${t('settings.providers.custom.fields.wireProtocol')}`}
                                           className="rounded-full px-2 py-1 text-[var(--text-secondary)] hover:bg-[var(--surface-hover)]">
                                           {protocolLabel(protocol.outbound)} <ChevronDown size={12} className="inline" aria-hidden />
                                         </button>
                                       </DropdownMenuTrigger>
                                       <DropdownMenuContent className="z-[10003]" align="start">
-                                        <DropdownMenuRadioGroup value={protocol.outbound ?? ''}
-                                          onValueChange={value => void setModelApi(agent, value as PiModelApi)}>
-                                          {MODEL_PROTOCOL_OPTIONS.map(([api, label]) => <DropdownMenuRadioItem key={api} value={api}>{label}</DropdownMenuRadioItem>)}
+                                        <DropdownMenuRadioGroup value={model?.availableInterfaces?.length ? model.userModelConfig?.interfaceId ?? ((model.userModelConfig?.api || model.userModelConfig?.piApi || model.userModelConfig?.route) ? model.selectedInterface?.profileId : 'auto') : protocol.outbound ?? ''}
+                                          onValueChange={value => void setModelApi(agent, value)}>
+                                          {model?.availableInterfaces?.length ? <>
+                                            <DropdownMenuRadioItem value="auto">{t('settings.providers.models.advanced.protocol.automatic')}</DropdownMenuRadioItem>
+                                            {model.availableInterfaces.map(item => <DropdownMenuRadioItem key={item.profileId} value={item.profileId}>{protocolLabel(item.api)}</DropdownMenuRadioItem>)}
+                                          </> : MODEL_PROTOCOL_OPTIONS.map(([api, label]) => <DropdownMenuRadioItem key={api} value={api}>{label}</DropdownMenuRadioItem>)}
                                         </DropdownMenuRadioGroup>
                                       </DropdownMenuContent>
                                     </DropdownMenu>
@@ -948,7 +976,7 @@ export function ModelAdvancedDrawer({
                         <Row label={t('settings.providers.models.advanced.imageCapability.label')}>
                           <DropdownMenu>
                             <DropdownMenuTrigger asChild>
-                              <button type="button" disabled={nameSaving || imageCapabilitySaving || !selectionAvailable || paymentRequired}
+                              <button type="button" disabled={configurationBlocked || nameSaving || protocolSaving || imageCapabilitySaving || !selectionAvailable || paymentRequired}
                                 aria-label={t('settings.providers.models.advanced.imageCapability.label')}
                                 className="rounded-full px-2 py-1 text-[var(--text-secondary)] hover:bg-[var(--surface-hover)]">
                                 {t(`settings.providers.models.advanced.imageCapability.${imageCapability}`)} <ChevronDown size={12} className="inline" aria-hidden />
@@ -973,7 +1001,7 @@ export function ModelAdvancedDrawer({
                         <Row label={t('settings.providers.models.advanced.videoCapability.label')}>
                           <DropdownMenu>
                             <DropdownMenuTrigger asChild>
-                              <button type="button" disabled={nameSaving || imageCapabilitySaving || !selectionAvailable || paymentRequired}
+                              <button type="button" disabled={configurationBlocked || nameSaving || protocolSaving || imageCapabilitySaving || !selectionAvailable || paymentRequired}
                                 aria-label={t('settings.providers.models.advanced.videoCapability.label')}
                                 className="rounded-full px-2 py-1 text-[var(--text-secondary)] hover:bg-[var(--surface-hover)]">
                                 {t(`settings.providers.models.advanced.videoCapability.${videoCapability}`)} <ChevronDown size={12} className="inline" aria-hidden />
@@ -1044,7 +1072,29 @@ export function ModelAdvancedDrawer({
 
                   <Section title={t('settings.providers.models.advanced.pricing')}>
                     {primaryModel.displayPricing && primaryModel.currency ? (
-                      <DisplayPricingDetails model={primaryModel} />
+                      <>
+                        {(['input', 'output', 'cacheRead', 'cacheWrite'] as const).map((role) => {
+                          const quotes = primaryModel.displayPricing?.summary?.[role];
+                          if (!quotes?.length) return null;
+                          return (
+                            <Row
+                              key={role}
+                              label={t(`settings.providers.models.advanced.price.${role === 'cacheWrite' ? 'cacheCreate' : role}`)}
+                            >
+                              <span className="flex flex-col items-end gap-1">
+                                {quotes.map((quote, index) => (
+                                  <DisplayPricingQuote
+                                    key={index}
+                                    quote={quote}
+                                    currency={primaryModel.currency!}
+                                    costDiscount={discount}
+                                  />
+                                ))}
+                              </span>
+                            </Row>
+                          );
+                        })}
+                      </>
                     ) : price === null ? (
                       <Row label={t('settings.providers.models.advanced.pricingLabel')} muted>
                         {t(
@@ -1077,7 +1127,7 @@ export function ModelAdvancedDrawer({
                         </Row>
                       ))
                     )}
-                    {!primaryModel.displayPricing && price?.kind === 'priced' && price.discount !== undefined && (
+                    {discount !== undefined && discount > 0 && discount <= 1 && (
                       <Row label={t('settings.providers.models.advanced.discount')}>
                         <span
                           className="inline-flex items-center rounded-full px-2 py-[1px] text-10 font-medium"
@@ -1086,10 +1136,17 @@ export function ModelAdvancedDrawer({
                             backgroundColor: `color-mix(in srgb, ${EFFORT_TIER_COLORS.low} 14%, transparent)`,
                           }}
                         >
-                          {`↓${Math.round(price.discount * 100)}%`}
+                          {`↓${Math.round(discount * 100)}%`}
                         </span>
                       </Row>
                     )}
+                    {/* Keep conditions and notes after the primary quotes and their discount. */}
+                    {primaryModel.displayPricing && primaryModel.currency &&
+                      !isDisplayPricingTableRedundant(primaryModel.displayPricing) && (
+                        <div className={primaryModel.displayPricing.summary ? 'pt-3' : undefined}>
+                          <DisplayPricingDetails model={primaryModel} />
+                        </div>
+                      )}
                     {/* 自定义报价:原「⋯」菜单的一项,搬到它真正相关的段落里。
                     XD 网关的价格由服务端定,不给覆盖入口(与 IPC 侧的拒绝一致)。 */}
                     {provider.id !== 'xd' && !isOrganizationManagedProvider(provider) && !paymentRequired && (
@@ -1108,10 +1165,10 @@ export function ModelAdvancedDrawer({
                         {(control) => (
                           <div className="flex flex-wrap items-center gap-2">
                             <SettingsTextInput {...control} size="sm" className="min-w-[120px] flex-1"
-                              value={nameDraft} disabled={nameSaving}
+                              value={nameDraft} disabled={nameSaving} maxLength={256}
                               onChange={(value) => { nameDirtyRef.current = true; setNameDraft(value); }} />
                             <Button type="button" variant="secondary" size="md" compact loading={nameSaving}
-                              disabled={refreshing || !nameDraft.trim() || !nameDirtyRef.current || protocolSaving || imageCapabilitySaving}
+                              disabled={configurationBlocked || nameDraft.trim().length > 256 || !nameDraft.trim() || !nameDirtyRef.current || protocolSaving || imageCapabilitySaving}
                               onClick={() => void saveModelName()}>
                               {t('settings.providers.models.advanced.saveName')}
                             </Button>

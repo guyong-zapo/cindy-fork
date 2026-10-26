@@ -40,7 +40,7 @@ const {
     mediaReady: false,
     customOverride: null as ProviderView | null,
     loading: false,
-    error: null as { reason: 'storage-quota' } | null,
+    error: null as { reason: 'storage-quota' | 'catalog-unavailable' } | null,
   },
   wizardSpy: vi.fn(),
 }));
@@ -243,7 +243,7 @@ describe('ProvidersSection — 双栏管理', () => {
   // #6601 review / #5090, unit: real ProvidersSection → list → drawer. Existing
   // discovery tests only cover completed refreshes. One pending fetch/readback
   // must block alias writes, keep the draft, then save against the refreshed config.
-  it('keeps a name draft without writing over an in-flight model refresh', async () => {
+  it.each(['success', 'failed'] as const)('keeps a name draft across a %s refresh readback', async (outcome) => {
     const initial = { id: 'refresh-rename', name: 'Relay', runtimes: { codex: { baseUrl: 'https://relay.example.invalid/v1', models: [{ id: 'private', name: 'Private', extra: { keep: true } }] } } };
     let stored: CustomProviderConfig = initial;
     providerSnapshotState.customOverride = { ...buildUserProvider(stored), connected: true };
@@ -260,6 +260,11 @@ describe('ProvidersSection — 双栏管理', () => {
     const view = render(page());
     refetchProvidersSpy.mockImplementation(async () => {
       await readback;
+      if (outcome === 'failed') {
+        providerSnapshotState.error = { reason: 'catalog-unavailable' };
+        view.rerender(page());
+        return false;
+      }
       providerSnapshotState.customOverride = { ...buildUserProvider(stored), connected: true };
       view.rerender(page());
       return true;
@@ -280,6 +285,19 @@ describe('ProvidersSection — 双栏管理', () => {
       expect(persist).toHaveBeenCalledOnce();
       const refreshed = structuredClone(stored);
       await act(async () => { finishReadback(); });
+      if (outcome === 'failed') {
+        expect(save.disabled).toBe(true);
+        fireEvent.click(save);
+        expect(persist).toHaveBeenCalledOnce();
+        expect(input.value).toBe('Work Alias');
+        refetchProvidersSpy.mockImplementation(async () => {
+          providerSnapshotState.error = null;
+          providerSnapshotState.customOverride = { ...buildUserProvider(stored), connected: true };
+          view.rerender(page());
+          return true;
+        });
+        await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'settings.providers.catalogRecovery.retry' })); });
+      }
       await waitFor(() => expect(save.disabled).toBe(false));
       expect(input.value).toBe('Work Alias');
       fireEvent.click(save);
