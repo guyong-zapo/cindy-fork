@@ -48,6 +48,7 @@ export function GroupMemberQuota({
   const devices = useDeviceLinkDeviceList();
   const directoryRequest = useDeviceLinkDeviceListRequestState();
   const directoryRef = useRef(devices);
+  const directoryStatusRef = useRef(directoryRequest.status);
   const targetDeviceId = target.kind === 'device' ? target.deviceId : null;
   const remoteTarget = target.kind === 'device';
   const owner = getDataOwnerGeneration();
@@ -59,6 +60,7 @@ export function GroupMemberQuota({
   const relayRef = useRef<typeof relay>(null);
   useLayoutEffect(() => {
     directoryRef.current = devices;
+    directoryStatusRef.current = directoryRequest.status;
     const current = relayRef.current;
     if (current?.owner === owner && current.status === 'online' && current.recovery &&
       devices !== current.recovery.directory && directoryRequest.status === 'ready') {
@@ -94,7 +96,8 @@ export function GroupMemberQuota({
     const apply = (status: QuotaRelayStatus) => {
       if (disposed || !isDataOwnerGenerationCurrent(owner)) return;
       const previous = relayRef.current?.owner === owner ? relayRef.current : null;
-      const recovery = status === 'online' && previous && previous.status !== 'online'
+      const needsEvidence = previous ? previous.status !== 'online' : directoryStatusRef.current !== 'ready';
+      const recovery = status === 'online' && needsEvidence
         ? { directory: directoryRef.current }
         : previous?.recovery ?? null;
       relayRef.current = { owner, status, recovery };

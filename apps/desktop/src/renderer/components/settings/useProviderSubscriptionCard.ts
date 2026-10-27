@@ -135,10 +135,10 @@ function useRemoteProviderSubscriptionCard(
   const providerId = provider?.id ?? 'openai';
   // Ordinary cards keep the upstream shared minute reader; expanded group cards
   // retain their native result + legacy mirror and explicit recovery/15s refresh.
-  const codex = useRemoteCodexAccountUsage(source === 'codex' ? deviceId : null, providerId, { live: !groupLive });
+  const codex = useRemoteCodexAccountUsage(source === 'codex' ? deviceId : null, providerId, { live: !groupLive, groupLive });
   const limits = useRemoteCodexRateLimits(groupLive && source === 'codex' ? deviceId : null, providerId);
-  const claude = useRemoteClaudeSubscriptionUsage(source === 'claude' ? deviceId : null, providerId);
-  const xai = useRemoteXaiSubscriptionUsage(source === 'xai' ? deviceId : null, providerId);
+  const claude = useRemoteClaudeSubscriptionUsage(source === 'claude' ? deviceId : null, providerId, { live: groupLive });
+  const xai = useRemoteXaiSubscriptionUsage(source === 'xai' ? deviceId : null, providerId, { live: groupLive });
   const [nowMs, setNowMs] = useState(Date.now);
   useEffect(() => {
     if (!source) return;

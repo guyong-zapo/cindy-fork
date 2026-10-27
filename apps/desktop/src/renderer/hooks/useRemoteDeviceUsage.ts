@@ -150,12 +150,12 @@ const xaiRateLimitMirror = createRemoteDeviceUsageMirror<XaiRateLimitSnapshot>({
 export function useRemoteCodexAccountUsage(
   deviceId: string | null,
   providerId?: string,
-  { live = false, web = false }: { live?: boolean; web?: boolean } = {},
+  { live = false, web = false, groupLive = false }: { live?: boolean; web?: boolean; groupLive?: boolean } = {},
 ): RemoteCodexAccountUsagePayload | null {
   // The WHAM slot still comes from the existing account reader. Sharing uses a
   // separate permissioned quota reader; session chips retain their push mirror.
   const target = live && isProviderShareAgentDeviceId(deviceId) ? null : deviceId;
-  const snapshot = codexAccountMirror.useMirror(live && !web ? null : target, providerId);
+  const snapshot = codexAccountMirror.useMirror(live && !web ? null : target, providerId, { live: groupLive });
   const realtime = codexRateLimitsMirror.useMirror(live ? target : null, providerId);
   return useMemo(() => {
     if (!live) return snapshot;
@@ -204,8 +204,9 @@ export function useRemoteClaudeAccountUsage(
 export function useRemoteXaiSubscriptionUsage(
   deviceId: string | null,
   providerId?: string,
+  options: { live?: boolean } = {},
 ): XaiSubscriptionUsageSnapshot | null {
-  return xaiSubscriptionMirror.useMirror(deviceId, providerId);
+  return xaiSubscriptionMirror.useMirror(deviceId, providerId, options);
 }
 
 export function requestRemoteXaiSubscriptionRefresh(

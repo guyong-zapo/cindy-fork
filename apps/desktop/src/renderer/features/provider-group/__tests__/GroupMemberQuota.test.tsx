@@ -105,6 +105,38 @@ afterEach(() => {
 });
 
 describe('GroupMemberQuota', () => {
+  // Unit r4389934292: the row was collapsed during reconnect, so no local
+  // status history exists. An initial online seed + retained loading/error
+  // directory must wait for a new target presence or authoritative list.
+  it.each([
+    { status: 'error', recovery: 'presence' },
+    { status: 'loading', recovery: 'directory' },
+  ] as const)('fences an initial online seed with a $status directory until $recovery', async ({ status, recovery }) => {
+    mocks.directoryStatus = status;
+    const view = () => <GroupMemberQuota id="quota" target={{ kind: 'device', deviceId: 'mini', providerId: 'anthropic-1a2b' }} offline={false} />;
+    const mounted = await mountQuota(view());
+    const unread = () => {
+      expect(screen.getByText('providerGroup.member.quota.offline')).toBeTruthy();
+      expect(screen.queryByTestId('quota-card')).toBeNull();
+      expect(mocks.deviceReads.at(-1)).toBeUndefined();
+      expect(mocks.cardReads.at(-1)).toEqual([undefined, null]);
+    };
+    unread();
+    const emit = (deviceId: string) => act(() => mocks.presence.forEach(listener => listener({
+      deviceId, online: true, remoteControlEnabled: true,
+      deviceName: 'Mini', platform: 'darwin', appVersion: 'test', lastSeenAt: 1, busy: false,
+    })));
+    emit('other');
+    unread();
+    if (recovery === 'presence') emit('mini');
+    else {
+      mocks.directoryStatus = 'ready';
+      mocks.devices = [...mocks.devices!];
+      mounted.rerender(view());
+    }
+    expect(screen.getByTestId('quota-card').textContent).toBe('Mini’s Claude');
+  });
+
   // Unit r4389675729 / §10: relay recovery is not target recovery. Old tests
   // only blocked while connecting/stopped, then trusted a retained online row.
   // The new generation needs either target presence or a successful new list.
@@ -152,6 +184,8 @@ describe('GroupMemberQuota', () => {
     mocks.directoryStatus = 'error';
     if (source === 'seed') mocks.getState.mockResolvedValue({ linkStatus: 'online', disabledControlDeviceIds: ['other'] });
     await show({ kind: 'device', deviceId: 'mini', providerId: 'anthropic-1a2b' });
+    // Keep control recovery isolated from the initial-directory liveness gate.
+    act(() => mocks.presence.forEach(listener => listener({ deviceId: 'mini', online: true, remoteControlEnabled: true } as DeviceLinkPresenceSnapshot)));
     if (source === 'push') {
       expect(screen.queryByTestId('quota-card')).toBeNull();
       act(() => mocks.control.forEach(listener => listener({ deviceId: 'mini', enabled: true, disabledControlDeviceIds: ['other'] })));

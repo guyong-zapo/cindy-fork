@@ -106,6 +106,26 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+// Unit r4389934308: a live card's owned recovery queue must be discarded by
+// identity clear or owner change even while another ordinary subscriber remains.
+// Previous owner/push tests did not contain a queued live observation-gap read.
+it.each(['clear', 'owner'] as const)('invalidates a queued live mirror reread after %s', async stop => {
+  const mirror = createRemoteDeviceUsageMirror<{ remaining: number }>({ invokeChannel: 'usage:test', pushChannel: 'usage:test-changed' });
+  let resolve!: (value: { remaining: number }) => void;
+  mocks.invoke.mockImplementation(() => new Promise(done => { resolve = done; }));
+  const other = renderHook(() => mirror.useMirror('mini'));
+  const live = renderHook(({ active }) => mirror.useMirror(active ? 'mini' : null, undefined, { live: true }),
+    { initialProps: { active: true } });
+  live.rerender({ active: false });
+  live.rerender({ active: true });
+  expect(mocks.invoke).toHaveBeenCalledTimes(1);
+  if (stop === 'clear') act(() => emitPush({ deviceId: 'mini', channel: 'usage:test-changed', payload: null }));
+  else act(() => setDataOwnerGeneration('owner-b'));
+  await act(async () => resolve({ remaining: 82 }));
+  expect(mocks.invoke).toHaveBeenCalledTimes(1);
+  expect(other.result.current).toBeNull();
+});
+
 describe('createRemoteDeviceUsageMirror', () => {
   it('push 整帧替换、null 清空,push-only 镜像不发 invoke', async () => {
     const pushOnly = createRemoteDeviceUsageMirror<{ v?: number }>({
