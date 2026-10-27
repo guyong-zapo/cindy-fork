@@ -239,6 +239,66 @@ describe('GroupMemberQuota', () => {
     expect(mocks.control.size).toBe(0);
   });
 
+  // Unit r4390515501 / §10: a ready directory already proved this target
+  // online, but the group's stale offline flag won again on an unrelated list
+  // refresh. Existing loading/error tests only covered unconfirmed old arrays.
+  it.each(['initial', 'recovered'] as const)('retains the %s ready target across unrelated directory refreshes', async phase => {
+    if (phase === 'recovered') mocks.devices = mocks.devices!.map(row => ({ ...row, online: row.deviceId !== 'mini' }));
+    const view = () => <GroupMemberQuota id="quota" target={{ kind: 'device', deviceId: 'mini', providerId: 'anthropic-1a2b' }} offline />;
+    const mounted = await mountQuota(view());
+    const unread = () => {
+      expect(screen.getByText('providerGroup.member.quota.offline')).toBeTruthy();
+      expect(screen.queryByTestId('quota-card')).toBeNull();
+      expect(mocks.deviceReads.at(-1)).toBeUndefined();
+      expect(mocks.cardReads.at(-1)).toEqual([undefined, null]);
+    };
+    const readable = () => {
+      expect(screen.getByTestId('quota-card').textContent).toBe('Mini’s Claude');
+      expect(mocks.deviceReads.at(-1)).toBe('mini');
+      expect(mocks.cardReads.at(-1)).toEqual(['anthropic-1a2b', 'mini']);
+    };
+    if (phase === 'recovered') {
+      unread();
+      mocks.devices = mocks.devices!.map(row => ({ ...row, online: true }));
+      mounted.rerender(view());
+    }
+    readable();
+    for (const status of ['loading', 'error'] as const) {
+      mocks.directoryStatus = status;
+      mounted.rerender(view());
+      readable();
+    }
+    // Even a changed array caused by another device is not target evidence.
+    mocks.devices = mocks.devices!.map(row => row.deviceId === 'mini' ? row : { ...row, online: false });
+    mounted.rerender(view());
+    readable();
+    const emit = (online: boolean) => act(() => mocks.presence.forEach(listener => listener({
+      deviceId: 'mini', online, remoteControlEnabled: true,
+      deviceName: 'Mini', platform: 'darwin', appVersion: 'test', lastSeenAt: 1, busy: false,
+    })));
+    emit(false);
+    unread();
+    mocks.devices = [...mocks.devices!];
+    mounted.rerender(view());
+    unread(); // A retained old online row cannot undo explicit target offline.
+    mocks.directoryStatus = 'ready';
+    mocks.devices = [...mocks.devices!];
+    mounted.rerender(view());
+    readable();
+    mocks.directoryStatus = 'error';
+    mounted.rerender(view());
+    act(() => mocks.control.forEach(listener => listener({ deviceId: 'mini', enabled: false, disabledControlDeviceIds: ['mini'] })));
+    unread();
+    act(() => mocks.control.forEach(listener => listener({ deviceId: 'mini', enabled: true, disabledControlDeviceIds: [] })));
+    readable(); // Re-enabling local control retains the confirmed peer liveness.
+    act(() => mocks.status.forEach(listener => listener({ status: 'connecting' })));
+    unread();
+    act(() => mocks.status.forEach(listener => listener({ status: 'online' })));
+    unread(); // Confirmation belongs to the prior relay generation.
+    emit(true);
+    readable();
+  });
+
   // Unit r4389193553 / §10: the old offline-directory test missed a stale
   // online array retained after a missed pre-mount offline event + failed read.
   // Error/loading cannot override the group's offline row without fresh target

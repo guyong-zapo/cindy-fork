@@ -52,6 +52,7 @@ export function GroupMemberQuota({
   const targetDeviceId = target.kind === 'device' ? target.deviceId : null;
   const remoteTarget = target.kind === 'device';
   const owner = getDataOwnerGeneration();
+  const confirmedDirectory = useRef<{ owner: typeof owner; deviceId: string } | null>(null);
   const [relay, setRelay] = useState<{
     owner: typeof owner;
     status: QuotaRelayStatus;
@@ -102,7 +103,10 @@ export function GroupMemberQuota({
         : previous?.recovery ?? null;
       relayRef.current = { owner, status, recovery };
       setRelay(relayRef.current);
-      if (status !== 'online') setPresence(null);
+      if (status !== 'online') {
+        confirmedDirectory.current = null;
+        setPresence(null);
+      }
     };
     // Subscribe before reading: a newer push must beat a delayed initial reply.
     const offStatus = deviceLink.onStatusChanged?.(({ status }) => {
@@ -129,6 +133,7 @@ export function GroupMemberQuota({
         snapshot.deviceId !== targetDeviceId || !isDataOwnerGenerationCurrent(owner) ||
         (currentRelay && isDataOwnerGenerationCurrent(currentRelay.owner) && currentRelay.status !== 'online')
       ) return;
+      if (!snapshot.online || !snapshot.remoteControlEnabled) confirmedDirectory.current = null;
       setPresence({
         deviceId: targetDeviceId, directory: devices, owner,
         online: snapshot.online, remoteControlEnabled: snapshot.remoteControlEnabled,
@@ -150,16 +155,30 @@ export function GroupMemberQuota({
   // target push or a ready directory published after this relay generation.
   const awaitingPeer = relay?.owner === owner && relay.recovery &&
     (devices === relay.recovery.directory || directoryRequest.status !== 'ready') && currentPresence?.online !== true;
+  // Keep this target's successful directory evidence through unrelated refresh
+  // loading/errors. It belongs to this owner/target/relay generation, and explicit
+  // target offline/remote-control evidence invalidates it immediately.
+  const directoryConfirmed = confirmedDirectory.current?.owner === owner &&
+    confirmedDirectory.current.deviceId === targetDeviceId;
+  useLayoutEffect(() => {
+    if (relayStatus !== 'online' || !targetDeviceId || !device || !device.online || !device.remoteControlEnabled ||
+      currentPresence?.online === false || currentPresence?.remoteControlEnabled === false) {
+      confirmedDirectory.current = null;
+    } else if (directoryRequest.status === 'ready' && !awaitingPeer) {
+      confirmedDirectory.current = { owner, deviceId: targetDeviceId };
+    }
+  }, [owner, targetDeviceId, device, directoryRequest.status, relayStatus, awaitingPeer,
+    currentPresence?.online, currentPresence?.remoteControlEnabled]);
   const controlEnabled = targetDeviceId !== null && control?.owner === owner
     ? !control.disabledDeviceIds.includes(targetDeviceId)
     : device?.controlEnabled;
   // A group row or remote presence cannot supply a local control grant.
   // A matching directory row is still required for provider and quota reads.
   // During an unknown/failed directory refresh, an offline group row also wins
-  // over retained online data until this target sends a fresh online presence.
+  // over unconfirmed retained online data until this target sends fresh evidence.
   const quotaOffline = remoteTarget
     ? (relayStatus !== null && relayStatus !== 'online') || !device || awaitingPeer ||
-      (offline && directoryRequest.status !== 'ready' && currentPresence?.online !== true) ||
+      (offline && directoryRequest.status !== 'ready' && !directoryConfirmed && currentPresence?.online !== true) ||
       !(currentPresence?.online ?? device.online) ||
       !(currentPresence?.remoteControlEnabled ?? device.remoteControlEnabled) || !controlEnabled
     : offline;
