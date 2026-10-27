@@ -46,6 +46,7 @@ import {
   enqueueSchedulerPrompt,
   ensureSchedulerQueueRestored,
   findSchedulerUsageLimitWait,
+  getSessionLastUserActionAt,
   hasQueuedSchedulerPrompt,
   isSchedulerAutoResumePending,
   isSchedulerPromptTracked,
@@ -75,7 +76,7 @@ export interface StartSchedulerDeps {
   getMainWindow: () => BrowserWindow | null;
   feishuIm: FeishuIM;
   logger: Logger;
-  beforeDispatchUserTurn?: (sessionId: string) => void | Promise<void>;
+  beforeDispatchUserTurn?: (sessionId: string, signal?: AbortSignal) => void | Promise<void>;
   onUndispatchedUserTurn?: (sessionId: string) => void;
 }
 
@@ -153,6 +154,7 @@ async function startSchedulerInternal(deps: StartSchedulerDeps): Promise<Schedul
     // 心跳撞忙排队桥:实现挂在 maker-ipc/register.ts 的 coordinator 装配处
     // 先恢复快照再判忙闲；holder 未就绪时恢复返回 false，由 runner 顺延。
     schedulerQueue: {
+      getLastUserActionAt: getSessionLastUserActionAt,
       ensureQueueRestored: ensureSchedulerQueueRestored,
       isSessionBusy: isSchedulerTargetSessionBusy,
       hasQueuedPrompt: hasQueuedSchedulerPrompt,

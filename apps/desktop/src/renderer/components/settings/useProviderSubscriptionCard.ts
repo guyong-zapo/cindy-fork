@@ -127,12 +127,15 @@ export function useProviderSubscriptionCard(
 function useRemoteProviderSubscriptionCard(
   provider: ProviderView | undefined,
   deviceId: string | null,
+  groupLive: boolean,
 ): UsageCardAccount | null {
   const { t, i18n } = useTranslation();
   const source = provider && deviceId ? providerWeeklyQuotaSource({ ...provider, suspended: false }) : null;
   const providerId = provider?.id ?? 'openai';
-  const codex = useRemoteCodexAccountUsage(source === 'codex' ? deviceId : null, providerId);
-  const limits = useRemoteCodexRateLimits(source === 'codex' ? deviceId : null, providerId);
+  // Ordinary cards keep the upstream shared minute reader; expanded group cards
+  // retain their native result + legacy mirror and explicit recovery/15s refresh.
+  const codex = useRemoteCodexAccountUsage(source === 'codex' ? deviceId : null, providerId, { live: !groupLive });
+  const limits = useRemoteCodexRateLimits(groupLive && source === 'codex' ? deviceId : null, providerId);
   const claude = useRemoteClaudeSubscriptionUsage(source === 'claude' ? deviceId : null, providerId);
   const xai = useRemoteXaiSubscriptionUsage(source === 'xai' ? deviceId : null, providerId);
   const [nowMs, setNowMs] = useState(Date.now);
@@ -143,6 +146,9 @@ function useRemoteProviderSubscriptionCard(
   }, [source]);
   if (source === 'codex') {
     const account = selectRemoteCodexAccountUsage(codex, 'app-server');
+    if (!groupLive) return account
+      ? buildCodexUsageCard(account, null, t, nowMs, i18n?.resolvedLanguage ?? i18n?.language)
+      : null;
     return limits || account
       ? buildSettingsCodexUsageCard(limits, account, t, nowMs, i18n?.resolvedLanguage ?? i18n?.language)
       : null;
@@ -175,6 +181,7 @@ export function useDeviceProviderSubscriptionCard(
   const remote = useRemoteProviderSubscriptionCard(
     deviceId === null ? undefined : activeProvider,
     deviceId,
+    options.live === true,
   );
   useEffect(() => {
     if (!options.live || !source || !providerId) return;

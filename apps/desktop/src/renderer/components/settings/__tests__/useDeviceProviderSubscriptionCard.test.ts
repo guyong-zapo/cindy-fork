@@ -59,9 +59,10 @@ vi.mock('@/hooks/useRemoteDeviceUsage', async () => {
   return {
     ...actual,
     selectRemoteCodexAccountUsage: actual.selectRemoteCodexAccountUsage,
-    useRemoteCodexAccountUsage: (deviceId: string | null, providerId?: string) => {
+    useRemoteCodexAccountUsage: (...args: Parameters<typeof actual.useRemoteCodexAccountUsage>) => {
+      const [deviceId, providerId] = args;
       mocks.remoteCodex.push([deviceId, providerId]);
-      return actual.useRemoteCodexAccountUsage(deviceId, providerId) ?? (deviceId ? mocks.codexUsage : null);
+      return actual.useRemoteCodexAccountUsage(...args) ?? (deviceId ? mocks.codexUsage : null);
     },
     useRemoteXaiSubscriptionUsage: (deviceId: string | null, providerId?: string) => {
       mocks.remoteXai.push([deviceId, providerId]);
@@ -72,19 +73,34 @@ vi.mock('@/hooks/useRemoteDeviceUsage', async () => {
 
 import { useDeviceProviderSubscriptionCard } from '../useProviderSubscriptionCard';
 import { resetRemoteDeviceUsageMirrorsForTest } from '@/hooks/useRemoteDeviceUsage';
+import { useProviderUsageSnapshots, useProviderWeeklyQuota } from '../../new-chat/useProviderWeeklyQuota';
+import { matchCodexBucketForModel } from '@cindy/maker-shared/codex-usage-buckets';
+import { installHiddenAnimationGate } from '@/lib/hiddenAnimationGate';
 
 function provider(id: string, auth: Record<string, unknown>): ProviderView {
   return { id, name: id, source: 'user', connected: true, auth } as unknown as ProviderView;
 }
 const claude = provider('anthropic-1a2b', { method: 'oauth', native: 'claude' });
 const apiKey = provider('openrouter', { method: 'api-key' });
+const codex = provider('openai', { method: 'oauth', native: 'codex' });
+const invoke = mocks.invoke;
+const liveQuota = (used = 42, providerId?: string) => ({
+  providerId,
+  account: { planType: 'pro' },
+  rateLimits: { limitId: 'promo', secondary: { usedPercent: 1, windowMinutes: 10080 } },
+  rateLimitsByLimitId: {
+    codex: { secondary: { usedPercent: used, windowMinutes: 10080 } },
+    'gpt-5.4': { limitId: 'gpt-5.4', limitName: 'GPT-5.4', secondary: { usedPercent: 7, windowMinutes: 10080 } },
+  },
+});
 
 beforeEach(() => {
   vi.useFakeTimers();
-  setDataOwnerGeneration('quota-owner');
+  vi.setSystemTime(new Date('2026-10-27T00:00:00Z'));
+  setDataOwnerGeneration('owner-a');
   resetRemoteDeviceUsageMirrorsForTest();
   vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
-  mocks.invoke.mockReset();
+  mocks.invoke.mockReset().mockResolvedValue(liveQuota());
   mocks.readLocal.mockReset();
   mocks.reopened.clear();
   mocks.codexUsage = null;
@@ -366,6 +382,146 @@ describe('useDeviceProviderSubscriptionCard', () => {
     expect(mocks.invoke).not.toHaveBeenCalled();
   });
 
+  // Unit regression: the real card hook used a day-old snapshot because remote reads
+  // never reached app-server. Existing account routing mocks did not exercise IPC.
+  it('reads live remote Codex quota and timestamps the generic account window', async () => {
+    let finish!: (value: ReturnType<typeof liveQuota>) => void;
+    invoke.mockImplementation((_device, channel) => channel === 'maker:usage:account'
+      ? Promise.resolve({ secondary: { usedPercent: 99 }, webSnapshot: { source: 'openai-web', secondary: { usedPercent: 88 } } })
+      : new Promise((resolve) => { finish = resolve; }));
+    const startedAt = Date.now();
+    const { result } = renderHook(() => ({
+      card: useDeviceProviderSubscriptionCard(codex, 'mini'),
+      rail: useProviderWeeklyQuota(codex, { deviceId: 'mini' }),
+      models: useProviderUsageSnapshots(codex, { deviceId: 'mini' }, { web: true }),
+    }));
+    expect(invoke.mock.calls.filter(([, channel]) => channel === 'maker:usage:codex-rate-limits')).toEqual([
+      ['mini', 'maker:usage:codex-rate-limits', ['openai']],
+    ]);
+    await act(async () => {});
+    expect(result.current.models.codex?.web?.secondary?.usedPercent).toBe(88);
+    expect(result.current.models.codex?.buckets).toBeNull();
+    expect(result.current.card).toBeNull();
+    await act(async () => { finish(liveQuota()); });
+    expect(remaining(result.current.card)).toEqual([['secondary', 42]]);
+    expect(result.current.card?.updatedAt).toBeGreaterThanOrEqual(startedAt);
+    expect(result.current.rail?.usedPercent).toBe(42);
+    expect(matchCodexBucketForModel(result.current.models.codex?.buckets, 'gpt-5.4')?.secondary?.usedPercent).toBe(7);
+    expect(result.current.models.codex?.web?.secondary?.usedPercent).toBe(88);
+  });
+
+  it('shares one read per minute and stops when hidden, closed or unmounted', async () => {
+    let nativeHidden!: (hidden: boolean) => void;
+    window.electronAPI.onWindowHiddenChange = (callback) => {
+      nativeHidden = callback;
+      return () => {};
+    };
+    const disposeGate = installHiddenAnimationGate();
+    const { result, rerender, unmount } = renderHook(({ open }) => ({
+      card: useDeviceProviderSubscriptionCard(open ? codex : undefined, 'mini'),
+      second: useDeviceProviderSubscriptionCard(open ? codex : undefined, 'mini'),
+    }), { initialProps: { open: true } });
+    await act(async () => {});
+    invoke.mockResolvedValue(liveQuota(56));
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(invoke).toHaveBeenCalledTimes(2);
+    expect(remaining(result.current.card)).toEqual([['secondary', 56]]);
+    expect(result.current.card?.updatedAt).toBe(Date.now());
+    await act(async () => { nativeHidden(true); });
+    expect(document.visibilityState).toBe('visible');
+    await act(async () => { await vi.advanceTimersByTimeAsync(120_000); });
+    expect(invoke).toHaveBeenCalledTimes(2);
+    await act(async () => { nativeHidden(false); });
+    expect(invoke).toHaveBeenCalledTimes(3);
+    act(() => {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(120_000); });
+    expect(invoke).toHaveBeenCalledTimes(3);
+    await act(async () => {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    expect(invoke).toHaveBeenCalledTimes(4);
+    rerender({ open: false });
+    await act(async () => { await vi.advanceTimersByTimeAsync(120_000); });
+    expect(invoke).toHaveBeenCalledTimes(4);
+    expect(result.current.card).toBeNull();
+    await act(async () => { nativeHidden(true); });
+    rerender({ open: true });
+    await act(async () => {});
+    expect(invoke).toHaveBeenCalledTimes(4);
+    await act(async () => { nativeHidden(false); });
+    expect(invoke).toHaveBeenCalledTimes(5);
+    unmount();
+    await act(async () => { await vi.advanceTimersByTimeAsync(120_000); });
+    expect(invoke).toHaveBeenCalledTimes(5);
+    disposeGate();
+  });
+
+  it.each(['[CHANNEL_NOT_ALLOWED]', 'network unavailable'])('falls back to the old snapshot after %s without clearing it on failure', async (error) => {
+    const updatedAt = Date.now() - 86_400_000;
+    invoke.mockImplementation(async (_device, channel) => {
+      if (channel === 'maker:usage:codex-rate-limits') throw new Error(error);
+      return { secondary: { usedPercent: 26, windowMinutes: 10080 }, updatedAt };
+    });
+    const { result } = renderHook(() => useDeviceProviderSubscriptionCard(codex, 'mini'));
+    await act(async () => {});
+    expect(invoke).toHaveBeenLastCalledWith('mini', 'maker:usage:account', ['codex']);
+    expect(remaining(result.current)).toEqual([['secondary', 26]]);
+    expect(result.current?.updatedAt).toBe(updatedAt);
+    invoke.mockRejectedValue(new Error('offline'));
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(remaining(result.current)).toEqual([['secondary', 26]]);
+    invoke.mockImplementation(async (_device, channel) => {
+      if (channel === 'maker:usage:codex-rate-limits') throw new Error(error);
+      return null; // The host cleared its account after logout, not a transport failure.
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(result.current).toBeNull();
+  });
+
+  it('rejects unscoped legacy replies for named accounts and keeps devices/accounts separate', async () => {
+    const named = provider('openai-secondary', { method: 'oauth', native: 'codex' });
+    invoke.mockImplementation(async (device, channel, [id]) => channel === 'maker:usage:account'
+      ? { secondary: { usedPercent: 99, windowMinutes: 10080 } }
+      : liveQuota(device === 'mini' ? 42 : 61, id === named.id ? undefined : id));
+    const { result } = renderHook(() => ({
+      first: useDeviceProviderSubscriptionCard(codex, 'mini'),
+      other: useDeviceProviderSubscriptionCard(codex, 'other'),
+      named: useDeviceProviderSubscriptionCard(named, 'mini'),
+    }));
+    await act(async () => {});
+    expect(remaining(result.current.first)).toEqual([['secondary', 42]]);
+    expect(remaining(result.current.other)).toEqual([['secondary', 61]]);
+    expect(result.current.named).toBeNull();
+    expect(invoke).toHaveBeenCalledWith('mini', 'maker:usage:codex-rate-limits', [named.id]);
+    invoke.mockResolvedValue(liveQuota(18, named.id));
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(remaining(result.current.named)).toEqual([['secondary', 18]]);
+    expect(remaining(result.current.first)).toEqual([['secondary', 42]]);
+  });
+
+  it('drops old-owner results and never queries sharing devices', async () => {
+    let finish!: (value: ReturnType<typeof liveQuota>) => void;
+    invoke.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const { result, rerender } = renderHook(({ device }) => useDeviceProviderSubscriptionCard(codex, device), {
+      initialProps: { device: 'mini' },
+    });
+    const oldFinish = finish;
+    setDataOwnerGeneration('owner-b');
+    rerender({ device: 'mini' });
+    await act(async () => { oldFinish(liveQuota(90)); });
+    expect(result.current).toBeNull();
+    await act(async () => { finish(liveQuota(15)); });
+    expect(remaining(result.current)).toEqual([['secondary', 15]]);
+    rerender({ device: 'share:example' });
+    const count = invoke.mock.calls.length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(120_000); });
+    expect(invoke).toHaveBeenCalledTimes(count);
+    expect(result.current).toBeNull();
+  });
   it('reads this computer’s account when no device is given', () => {
     const { result } = renderHook(() => useDeviceProviderSubscriptionCard(claude, null));
     expect(remaining(result.current)).toEqual([['five-hour', 10], ['seven-day', 26]]);

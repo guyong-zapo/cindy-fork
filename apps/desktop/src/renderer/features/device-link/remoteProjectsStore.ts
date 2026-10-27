@@ -70,6 +70,10 @@ function recomputeScheduleIndex(): void {
     mergedScheduleIndex = next;
 }
 const subs = new Set<() => void>();
+// A cold renderer has not read its cache or discovered devices yet. An empty
+// bootstrap set during this phase must not be mistaken for a completed lookup.
+let initialDiscoverySettled = false;
+let initialDiscoveryGeneration = 0;
 /**
  * 正在读取任务快照的设备。它与 shard 是否存在独立：重连或手动重试时可以
  * 一边保留旧快照、一边明确告知用户「正在重新读取」。
@@ -114,7 +118,7 @@ const detailPatchEpoch = new Map<string, number>();
 const sessionContentOrigins = new WeakMap<Session, Session>();
 // Activity and list presentation pushes do not establish a newer model route.
 const activityFields = ['totalMoney', 'totalCostUsd', 'totalTokenUsage', 'lastTurnEndedAt',
-  'preview', 'title', 'userSendAt', 'updatedAt'] as const;
+  'preview', 'title', 'userSendAt', 'lastActivityAt', 'updatedAt'] as const;
 const activityFieldNames: ReadonlySet<string> = new Set(activityFields);
 type ActivityField = typeof activityFields[number];
 // Per-field markers distinguish pushes after a GET began, even equal-value pushes.
@@ -174,8 +178,8 @@ const sessionTitleIndex = new Map<string, string>();
  * 那个窗口里 sessionDeviceIndex 没有这条,`getSessionDeviceId` 返回 undefined —— 传输层据此把
  * 一个**远程**会话的操作发给本机 maker:首条消息、setGoal、流订阅全落错边(#807 review P1)。
  *
- * 所以创建成功后立刻把这个已确定的事实钉进来,recompute 时先铺钉子、再让分片派生值覆盖
- * (分片更完整,且与钉子不可能冲突)。钉子只影响 origin 判定,不伪造会话行 —— 会话进列表仍等
+ * 创建成功或打开带设备归属的链接后立刻把目标钉进来。recompute 时钉子优先于其它设备
+ * 的同 id 分片(复制的任务可能保留 id)。钉子只选择 origin 与标题,不伪造会话行 —— 会话进列表仍等
  * 权威快照。
  *
  * 不主动清理(含 clear / removeDevice):与 stickySessionOrigin 同一论证 —— 归属是单向的
@@ -451,7 +455,7 @@ function recompute(): void {
   sessionDeviceIndex.clear();
   sessionTitleIndex.clear();
   // 先铺 origin 钉子:分片还没到的新建远程会话也必须能被判定为远程(见 pinnedOrigins)。
-  // 分片派生值随后覆盖同 id 的条目。
+  // 其它设备的同 id 分片不能覆盖显式指定的 origin。
   for (const [sessionId, deviceId] of pinnedOrigins) sessionDeviceIndex.set(sessionId, deviceId);
   if (shards.size === 0) {
     mergedSnapshot = EMPTY;
@@ -464,8 +468,11 @@ function recompute(): void {
           shard.deviceId,
         );
         flat.push(projected);
-        sessionDeviceIndex.set(s.id, shard.deviceId);
-        if (projected.title) sessionTitleIndex.set(s.id, projected.title);
+        const pinnedDeviceId = pinnedOrigins.get(s.id);
+        if (!pinnedDeviceId || pinnedDeviceId === shard.deviceId) {
+          sessionDeviceIndex.set(s.id, shard.deviceId);
+          if (projected.title) sessionTitleIndex.set(s.id, projected.title);
+        }
       }
     }
     mergedSnapshot = flat;
@@ -564,6 +571,21 @@ function stamp(
 }
 
 const actions = {
+  /** The synchronizer owns initialization; late completion cannot settle a newer run. */
+  beginInitialDiscovery(): () => void {
+    const generation = ++initialDiscoveryGeneration;
+    initialDiscoverySettled = false;
+    subs.forEach((fn) => fn());
+    return () => {
+      if (generation !== initialDiscoveryGeneration || initialDiscoverySettled) return;
+      initialDiscoverySettled = true;
+      subs.forEach((fn) => fn());
+    };
+  },
+
+  getInitialDiscoverySettled(): boolean {
+    return initialDiscoverySettled;
+  },
   setDeviceScheduleBindings(deviceId: string, bindings: readonly ScheduleBinding[]): void {
     const shard = shards.get(deviceId);
     if (!shard) return;
@@ -983,6 +1005,10 @@ const actions = {
 
   /** 清空所有远端项目(登出 / device-link stopped / 卸载)。 */
   clear(): void {
+    // Logout, stopped and unmount cancel initialization as well as snapshots.
+    const initialDiscoveryChanged = !initialDiscoverySettled;
+    initialDiscoveryGeneration += 1;
+    initialDiscoverySettled = true;
     // 所有设备 epoch 无条件**自增**(不 clear-to-0,见 snapshotEpoch 注释的 ABA):清空时在途
     // 首拉立即失效;下一轮 bootstrap 拿到更高 epoch,不会与清空前的 epoch 撞值把陈旧 snapshot 盖回。
     for (const [k, v] of snapshotEpoch) snapshotEpoch.set(k, v + 1);
@@ -1004,7 +1030,7 @@ const actions = {
     if (bootstrapFailedDeviceIds.size > 0) bootstrapFailedDeviceIds = new Set();
     if (archivedFailedDeviceIds.size > 0) archivedFailedDeviceIds = new Set();
     if (shards.size === 0) {
-      if (bootstrapStateChanged) subs.forEach((fn) => fn());
+      if (bootstrapStateChanged || initialDiscoveryChanged) subs.forEach((fn) => fn());
       return;
     }
     shards.clear();
@@ -1408,6 +1434,11 @@ export function useRemoteSessionTitle(sessionId: string | undefined): string | n
 /** 组件内订阅:返回扁平远端会话快照(喂给 sidebar 合并点)。 */
 export function useRemoteProjectSessions(): Session[] {
   return useSyncExternalStore(subscribe, actions.getVisibleMergedRemoteSessions);
+}
+
+/** Initial discovery settled, was cancelled, or exceeded the startup route's wait budget. */
+export function useRemoteInitialDiscoverySettled(): boolean {
+  return useSyncExternalStore(subscribe, actions.getInitialDiscoverySettled);
 }
 
 /** 组件内订阅:返回当前已连接的被控设备摘要列表(机器切换栏 chips)。 */

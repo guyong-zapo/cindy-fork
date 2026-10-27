@@ -1,5 +1,7 @@
-import { useEffect } from 'react';
+import { useEffect, useMemo } from 'react';
 import type { MobileCodexRateLimitsResult } from '@cindy/maker-shared/device-link-contract';
+import { getDataOwnerGeneration, isDataOwnerGenerationCurrent } from '@/contexts/dataOwnerGeneration';
+import { isProviderShareAgentDeviceId } from '../../shared/providerShare';
 import { useDeviceLinkReconnectEpoch } from '../features/device-link/useDeviceLinkReconnectEpoch';
 import { CLAUDE_QUOTA_STATE_READ, isClaudeQuotaClear } from '../../shared/claudeQuotaState';
 /**
@@ -47,7 +49,7 @@ const codexAccountMirror = createRemoteDeviceUsageMirror<RemoteCodexAccountUsage
   defaultProviderId: 'openai',
   providerPushChannel: 'usage:codex-provider-account-changed',
 });
-const codexRateLimitsMirror = createRemoteDeviceUsageMirror<MobileCodexRateLimitsResult>({
+const codexNativeRateLimitsMirror = createRemoteDeviceUsageMirror<MobileCodexRateLimitsResult>({
   invokeChannel: 'maker:usage:codex-rate-limits',
   pushChannel: 'usage:codex-account-changed',
   defaultProviderId: 'openai',
@@ -74,6 +76,52 @@ const codexRateLimitsMirror = createRemoteDeviceUsageMirror<MobileCodexRateLimit
   // RPC result; refetching on its own non-null push would create a request loop.
   decodePush: (value) => (value === null ? null : undefined),
 });
+
+/** Account cards and model lists read app-server directly, just like Mobile. */
+const codexRateLimitsMirror = createRemoteDeviceUsageMirror<RemoteCodexAccountUsagePayload>({
+  invokeChannel: 'maker:usage:codex-rate-limits',
+  pushChannel: null,
+  defaultProviderId: 'openai',
+  refreshIntervalMs: 60_000,
+  async read(deviceId, providerId = 'openai') {
+    const owner = getDataOwnerGeneration();
+    const matchesProvider = (value: { providerId?: string }) =>
+      value.providerId === providerId || (value.providerId === undefined && providerId === 'openai');
+    try {
+      const result = await window.electronAPI.deviceLink.invoke(
+        deviceId, 'maker:usage:codex-rate-limits', [providerId],
+      ) as MobileCodexRateLimitsResult | null;
+      if (result && matchesProvider(result) && result.rateLimits && result.account) {
+        const updatedAt = Date.now();
+        const buckets = result.rateLimitsByLimitId ?? {
+          [result.rateLimits.limitId ?? 'codex']: result.rateLimits,
+        };
+        return {
+          // An empty authoritative table must not revive the compatibility slot.
+          ...(Object.keys(buckets).length ? result.rateLimits : {}),
+          providerId,
+          webSnapshot: null,
+          planType: result.account.planType ?? result.rateLimits.planType,
+          updatedAt,
+          appServerBuckets: Object.fromEntries(Object.entries(buckets).map(([id, bucket]) => [id, {
+            ...bucket, planType: result.account.planType ?? bucket.planType, updatedAt,
+          }])),
+        };
+      }
+    } catch {
+      // Old hosts or temporary read failures retain the previous snapshot below.
+    }
+    if (!isDataOwnerGenerationCurrent(owner)) return undefined;
+    const fallback = await window.electronAPI.deviceLink.invoke(
+      deviceId, 'maker:usage:account', providerId === 'openai' ? ['codex'] : ['codex', providerId],
+    ) as (RemoteCodexAccountUsagePayload & { providerId?: string }) | null;
+    // A successful empty account read is authoritative (for example after logout).
+    if (fallback === null) return null;
+    if (!fallback || !matchesProvider(fallback)) return undefined;
+    return fallback;
+  },
+});
+
 const claudeAccountMirror = createRemoteDeviceUsageMirror<ClaudeAccountUsageSnapshot>({
   invokeChannel: 'maker:usage:account',
   invokeArgs: ['claude-code', CLAUDE_QUOTA_STATE_READ],
@@ -101,8 +149,19 @@ const xaiRateLimitMirror = createRemoteDeviceUsageMirror<XaiRateLimitSnapshot>({
 export function useRemoteCodexAccountUsage(
   deviceId: string | null,
   providerId?: string,
+  { live = false, web = false }: { live?: boolean; web?: boolean } = {},
 ): RemoteCodexAccountUsagePayload | null {
-  return codexAccountMirror.useMirror(deviceId, providerId);
+  // The WHAM slot still comes from the existing account reader. Sharing uses a
+  // separate permissioned quota reader; session chips retain their push mirror.
+  const target = live && isProviderShareAgentDeviceId(deviceId) ? null : deviceId;
+  const snapshot = codexAccountMirror.useMirror(live && !web ? null : target, providerId);
+  const realtime = codexRateLimitsMirror.useMirror(live ? target : null, providerId);
+  return useMemo(() => {
+    if (!live) return snapshot;
+    if (!web) return realtime;
+    if (!realtime && !snapshot?.webSnapshot) return null;
+    return { ...realtime, webSnapshot: snapshot?.webSnapshot };
+  }, [live, web, realtime, snapshot]);
 }
 
 export function requestRemoteCodexAccountRefresh(
@@ -119,14 +178,14 @@ export function useRemoteCodexRateLimits(
   deviceId: string | null,
   providerId?: string,
 ): MobileCodexRateLimitsResult | null {
-  const snapshot = codexRateLimitsMirror.useMirror(deviceId, providerId);
+  const snapshot = codexNativeRateLimitsMirror.useMirror(deviceId, providerId);
   useEffect(() => {
-    if (deviceId) codexRateLimitsMirror.request(deviceId, providerId);
+    if (deviceId) codexNativeRateLimitsMirror.request(deviceId, providerId);
   }, [deviceId, providerId]);
   return snapshot;
 }
 
-export const requestRemoteCodexRateLimitsRefresh = codexRateLimitsMirror.request;
+export const requestRemoteCodexRateLimitsRefresh = codexNativeRateLimitsMirror.request;
 
 /** 被控端 Claude 网关配额(LiteLLM daily/monthly)镜像(远程网关形态会话 chip 用)。 */
 export function useRemoteClaudeAccountUsage(
@@ -191,6 +250,7 @@ export function selectRemoteCodexAccountUsage(
 export function resetRemoteDeviceUsageMirrorsForTest(): void {
   codexAccountMirror.resetForTest();
   codexRateLimitsMirror.resetForTest();
+  codexNativeRateLimitsMirror.resetForTest();
   claudeAccountMirror.resetForTest();
   xaiSubscriptionMirror.resetForTest();
   xaiRateLimitMirror.resetForTest();
