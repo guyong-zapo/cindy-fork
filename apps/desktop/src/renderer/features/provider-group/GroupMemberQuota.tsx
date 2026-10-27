@@ -4,7 +4,7 @@
  * 我的其他电脑经 device-link 查询那台的额度，OpenAI 优先原生查询。别人分享来的电脑不读：分享者的余量不对受邀者开放
  * (与任务底部用量条同一口径，见 lib/usageAccountLocation.ts)。只在展开时挂载，收起的行不读任何电脑。
  */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { useDeviceProviderSubscriptionCard } from '@/components/settings/useProviderSubscriptionCard';
@@ -47,11 +47,27 @@ export function GroupMemberQuota({
   // quota reads recover without waiting for that cache and the next group poll.
   const devices = useDeviceLinkDeviceList();
   const directoryRequest = useDeviceLinkDeviceListRequestState();
+  const directoryRef = useRef(devices);
   const targetDeviceId = target.kind === 'device' ? target.deviceId : null;
   const remoteTarget = target.kind === 'device';
   const owner = getDataOwnerGeneration();
-  const [relay, setRelay] = useState<{ owner: typeof owner; status: QuotaRelayStatus } | null>(null);
+  const [relay, setRelay] = useState<{
+    owner: typeof owner;
+    status: QuotaRelayStatus;
+    recovery: { directory: typeof devices } | null;
+  } | null>(null);
   const relayRef = useRef<typeof relay>(null);
+  useLayoutEffect(() => {
+    directoryRef.current = devices;
+    const current = relayRef.current;
+    if (current?.owner === owner && current.status === 'online' && current.recovery &&
+      devices !== current.recovery.directory && directoryRequest.status === 'ready') {
+      // A successful new-generation directory remains valid through later
+      // transient refresh failures, until the next relay interruption.
+      relayRef.current = { ...current, recovery: null };
+      setRelay(relayRef.current);
+    }
+  }, [devices, directoryRequest.status, owner, relay]);
   const [control, setControl] = useState<{ owner: typeof owner; disabledDeviceIds: string[] } | null>(null);
   const [presence, setPresence] = useState<{
     deviceId: string;
@@ -77,7 +93,11 @@ export function GroupMemberQuota({
     });
     const apply = (status: QuotaRelayStatus) => {
       if (disposed || !isDataOwnerGenerationCurrent(owner)) return;
-      relayRef.current = { owner, status };
+      const previous = relayRef.current?.owner === owner ? relayRef.current : null;
+      const recovery = status === 'online' && previous && previous.status !== 'online'
+        ? { directory: directoryRef.current }
+        : previous?.recovery ?? null;
+      relayRef.current = { owner, status, recovery };
       setRelay(relayRef.current);
       if (status !== 'online') setPresence(null);
     };
@@ -89,7 +109,9 @@ export function GroupMemberQuota({
     if (remoteTarget) {
       void deviceLink.getState?.().then(state => {
         if (revision === 0) apply(state.linkStatus);
-        if (controlRevision === 0) applyControl(state.disabledControlDeviceIds ?? []);
+        if (controlRevision === 0 && Array.isArray(state.disabledControlDeviceIds)) {
+          applyControl(state.disabledControlDeviceIds);
+        }
       }).catch(() => undefined);
     }
     return () => { disposed = true; offStatus?.(); offControl?.(); };
@@ -112,24 +134,31 @@ export function GroupMemberQuota({
     return () => { offPresence?.(); };
   }, [targetDeviceId, devices, owner]);
   // listDevices preserves its old array after a failed refresh. A target push
-  // remains fresher until the directory changes; local control permission still
-  // comes only from that directory, never from a remote online announcement.
+  // remains fresher until the directory changes; local control permission comes
+  // from the local preference snapshot, falling back to directory data only when
+  // that snapshot is unavailable, never from a remote online announcement.
   const currentPresence = presence?.deviceId === targetDeviceId && presence.directory === devices &&
     isDataOwnerGenerationCurrent(presence.owner) ? presence : null;
   const device = target.kind === 'device' ? devices?.find((entry) => entry.deviceId === target.deviceId) : undefined;
   // A stopped relay clears the shared directory to null. Keep the stop signal
   // across that update instead of falling back to a stale online group row.
   const relayStatus = relay && isDataOwnerGenerationCurrent(relay.owner) ? relay.status : null;
-  // A cached group row or presence push cannot supply the local control grant.
-  // Missing directory permissions must stop both provider and quota reads.
+  // A relay reconnect does not prove that its peers returned. Accept only a
+  // target push or a ready directory published after this relay generation.
+  const awaitingPeer = relay?.owner === owner && relay.recovery &&
+    (devices === relay.recovery.directory || directoryRequest.status !== 'ready') && currentPresence?.online !== true;
+  const controlEnabled = targetDeviceId !== null && control?.owner === owner
+    ? !control.disabledDeviceIds.includes(targetDeviceId)
+    : device?.controlEnabled;
+  // A group row or remote presence cannot supply a local control grant.
+  // A matching directory row is still required for provider and quota reads.
   // During an unknown/failed directory refresh, an offline group row also wins
   // over retained online data until this target sends a fresh online presence.
   const quotaOffline = remoteTarget
-    ? (relayStatus !== null && relayStatus !== 'online') || !device ||
-      (targetDeviceId !== null && control?.owner === owner && control.disabledDeviceIds.includes(targetDeviceId)) ||
+    ? (relayStatus !== null && relayStatus !== 'online') || !device || awaitingPeer ||
       (offline && directoryRequest.status !== 'ready' && currentPresence?.online !== true) ||
       !(currentPresence?.online ?? device.online) ||
-      !(currentPresence?.remoteControlEnabled ?? device.remoteControlEnabled) || !device.controlEnabled
+      !(currentPresence?.remoteControlEnabled ?? device.remoteControlEnabled) || !controlEnabled
     : offline;
   // Unknown initial state cannot authorize a remote read from a cached group row.
   const remoteDeviceId = target.kind === 'device' && relayStatus === 'online' && !quotaOffline ? target.deviceId : null;

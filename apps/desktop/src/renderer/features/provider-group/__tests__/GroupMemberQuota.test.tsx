@@ -105,6 +105,64 @@ afterEach(() => {
 });
 
 describe('GroupMemberQuota', () => {
+  // Unit r4389675729 / §10: relay recovery is not target recovery. Old tests
+  // only blocked while connecting/stopped, then trusted a retained online row.
+  // The new generation needs either target presence or a successful new list.
+  it.each(['presence', 'directory'] as const)('waits for fresh peer %s after relay recovery', async (recovery) => {
+    const view = () => <GroupMemberQuota id="quota" target={{ kind: 'device', deviceId: 'mini', providerId: 'anthropic-1a2b' }} offline={false} />;
+    const mounted = await mountQuota(view());
+    expect(screen.getByTestId('quota-card').textContent).toBe('Mini’s Claude');
+    act(() => mocks.status.forEach(listener => listener({ status: 'connecting' })));
+    // A directory loaded while relay was still connecting is also too old.
+    mocks.devices = [...mocks.devices!];
+    mounted.rerender(view());
+    mocks.directoryStatus = 'error';
+    act(() => mocks.status.forEach(listener => listener({ status: 'online' })));
+    const unread = () => {
+      expect(screen.getByText('providerGroup.member.quota.offline')).toBeTruthy();
+      expect(screen.queryByTestId('quota-card')).toBeNull();
+      expect(mocks.deviceReads.at(-1)).toBeUndefined();
+      expect(mocks.cardReads.at(-1)).toEqual([undefined, null]);
+    };
+    unread();
+    const emit = (deviceId: string) => act(() => mocks.presence.forEach(listener => listener({
+      deviceId, online: true, remoteControlEnabled: true,
+      deviceName: 'Mini', platform: 'darwin', appVersion: 'test', lastSeenAt: 1, busy: false,
+    })));
+    emit('other');
+    unread();
+    if (recovery === 'presence') emit('mini');
+    else {
+      mocks.directoryStatus = 'ready';
+      mocks.devices = [...mocks.devices!];
+      mounted.rerender(view());
+    }
+    expect(screen.getByTestId('quota-card').textContent).toBe('Mini’s Claude');
+    // Once validated in this generation, a later directory failure retains it.
+    mocks.directoryStatus = 'error';
+    mounted.rerender(view());
+    expect(screen.getByTestId('quota-card').textContent).toBe('Mini’s Claude');
+  });
+
+  // Unit r4389675738: directory=false can remain cached after local enable.
+  // A valid full local preference snapshot is authoritative in both directions;
+  // an older preload that supplies no list still uses the directory fallback.
+  it.each(['push', 'seed'] as const)('restores quota from the current local control %s despite a stale disabled row', async (source) => {
+    mocks.devices = [{ deviceId: 'mini', online: true, remoteControlEnabled: true, controlEnabled: false }];
+    mocks.directoryStatus = 'error';
+    if (source === 'seed') mocks.getState.mockResolvedValue({ linkStatus: 'online', disabledControlDeviceIds: ['other'] });
+    await show({ kind: 'device', deviceId: 'mini', providerId: 'anthropic-1a2b' });
+    if (source === 'push') {
+      expect(screen.queryByTestId('quota-card')).toBeNull();
+      act(() => mocks.control.forEach(listener => listener({ deviceId: 'mini', enabled: true, disabledControlDeviceIds: ['other'] })));
+    }
+    expect(screen.getByTestId('quota-card').textContent).toBe('Mini’s Claude');
+    expect(mocks.cardReads.at(-1)).toEqual(['anthropic-1a2b', 'mini']);
+    act(() => mocks.control.forEach(listener => listener({ deviceId: 'mini', enabled: false, disabledControlDeviceIds: ['mini', 'other'] })));
+    expect(screen.getByText('providerGroup.member.quota.offline')).toBeTruthy();
+    expect(mocks.cardReads.at(-1)).toEqual([undefined, null]);
+  });
+
   // Unit r4389410005: an already-open online row missed local opt-out because
   // listDevices failed and no presence announced the control preference change.
   // Retain that local event across failed/new directory snapshots; online
@@ -243,6 +301,10 @@ describe('GroupMemberQuota', () => {
     expect(screen.queryByTestId('quota-card')).toBeNull();
     expect(mocks.cardReads.at(-1)).toEqual([undefined, null]);
     act(() => mocks.status.forEach(listener => listener({ status: 'online' })));
+    if (state === 'stopped') {
+      expect(screen.queryByTestId('quota-card')).toBeNull();
+      act(() => mocks.presence.forEach(listener => listener({ deviceId: 'mini', online: true, remoteControlEnabled: true } as DeviceLinkPresenceSnapshot)));
+    }
     expect(screen.getByTestId('quota-card').textContent).toBe('Mini’s Claude');
     mounted.unmount();
   });
@@ -274,6 +336,9 @@ describe('GroupMemberQuota', () => {
     await act(async () => replies[1]({ linkStatus: 'stopped' }));
     expect(screen.getByText('providerGroup.member.quota.offline')).toBeTruthy();
     act(() => mocks.status.forEach(listener => listener({ status: 'online' })));
+    expect(screen.queryByTestId('quota-card')).toBeNull();
+    mocks.devices = [...mocks.devices!];
+    mounted.rerender(view());
     expect(screen.getByTestId('quota-card').textContent).toBe('Mini’s Claude');
   });
 
@@ -303,6 +368,8 @@ describe('GroupMemberQuota', () => {
     mounted.rerender(<GroupMemberQuota id="quota" target={{ kind: 'local', providerId: 'anthropic' }} offline={false} />);
     expect(screen.getByTestId('quota-card').textContent).toBe('This computer’s Claude');
     act(() => mocks.status.forEach(listener => listener({ status: 'online' })));
+    // Recovery needs a new directory from the now-online relay generation.
+    mocks.devices = [...online];
     mounted.rerender(remote());
     expect(screen.getByTestId('quota-card').textContent).toBe('Mini’s Claude');
     mounted.unmount();
