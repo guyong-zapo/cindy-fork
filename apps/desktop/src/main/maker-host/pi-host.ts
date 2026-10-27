@@ -1455,14 +1455,12 @@ export function buildPiNativeProvidersFromConfigs(
           modelApi === 'google-generative-ai' && !m.route?.requestPath && !rt.requestPath
             ? providerBaseUrlForApi(rt.baseUrl, modelApi) : undefined;
         // OpenAI clients use /v1 as their root; Anthropic appends /v1/messages.
-        // The protocol selector saves a same-endpoint route when the user picks
-        // Messages, so that route needs the same correction. Distinct routes and
-        // custom proxy prefixes remain authoritative.
+        // An absent model route may inherit the OpenAI /v1 endpoint, but a saved
+        // route remains authoritative even when it equals the provider endpoint.
         const nativeAnthropicBaseUrl =
           modelApi === 'anthropic-messages' &&
           (runtimeApi === 'openai-completions' || runtimeApi === 'openai-responses') &&
-          authMethod !== 'oauth' && !rt.requestPath && !m.route?.requestPath &&
-          (!m.route || (m.route.baseUrl === rt.baseUrl && m.route.wireProtocol === 'anthropic-messages'))
+          authMethod !== 'oauth' && !rt.requestPath && !m.route
             ? anthropicRootForOpenAiV1(rt.baseUrl) : undefined;
         const modelBaseUrl =
           nativeAnthropicBaseUrl ?? (m.api && m.route ? m.route.baseUrl :

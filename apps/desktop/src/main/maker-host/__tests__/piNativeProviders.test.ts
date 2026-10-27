@@ -452,7 +452,7 @@ describe('buildPiNativeProvidersFromConfigs', () => {
     expect(providers[0].models[0]).not.toHaveProperty('baseUrl');
   });
 
-  it('materializes a Messages root for the same-endpoint route saved by the Pi protocol selector', () => {
+  it('preserves an old same-endpoint Messages route whose source cannot be identified', () => {
     const baseUrl = 'http://127.0.0.1:8765/v1';
     const { providers } = buildPiNativeProvidersFromConfigs([{
       id: 'ui-selected-gateway', name: 'UI Selected Gateway', auth: { method: 'none' },
@@ -469,9 +469,8 @@ describe('buildPiNativeProvidersFromConfigs', () => {
 
     expect(providers[0].baseUrl).toBe(baseUrl);
     expect(providers[0].models[0]).not.toHaveProperty('baseUrl');
-    expect(providers[0].models[1]).toMatchObject({
-      api: 'anthropic-messages', baseUrl: 'http://127.0.0.1:8765',
-    });
+    expect(providers[0].models[1]).toMatchObject({ api: 'anthropic-messages' });
+    expect(providers[0].models[1]).not.toHaveProperty('baseUrl');
   });
 
   it('leaves an OpenAI proxy prefix intact for Messages models with or without selector routes', () => {
