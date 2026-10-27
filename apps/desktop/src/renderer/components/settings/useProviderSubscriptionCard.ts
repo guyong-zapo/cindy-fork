@@ -97,8 +97,8 @@ export function useProviderSubscriptionCard(
     undefined,
     providerId,
   );
-  const claude = useClaudeSubscriptionUsage(source === 'claude', providerId);
-  const xai = useXaiSubscriptionUsage(source === 'xai', providerId);
+  const claude = useClaudeSubscriptionUsage(source === 'claude', providerId, options);
+  const xai = useXaiSubscriptionUsage(source === 'xai', providerId, options);
   const [nowMs, setNowMs] = useState(Date.now);
   useEffect(() => {
     if (!source) return;
@@ -106,8 +106,8 @@ export function useProviderSubscriptionCard(
     return () => window.clearInterval(timer);
   }, [source]);
   useEffect(() => {
-    if (source === 'xai' && !isXaiWeeklyUsageCurrent(xai, nowMs)) requestXaiSubscriptionRefresh(providerId);
-  }, [source, xai, nowMs, providerId]);
+    if (!options.live && source === 'xai' && !isXaiWeeklyUsageCurrent(xai, nowMs)) requestXaiSubscriptionRefresh(providerId);
+  }, [source, xai, nowMs, providerId, options.live]);
   if (source === 'codex' && (snapshot || account))
     return buildSettingsCodexUsageCard(
       snapshot,
@@ -237,6 +237,6 @@ function refreshSubscriptionCard(
   } else if (source === 'codex') {
     requestCodexRateLimitsRefresh(providerId);
     requestCodexAccountRefresh(providerId);
-  } else if (source === 'claude') requestClaudeSubscriptionRefresh(providerId);
-  else requestXaiSubscriptionRefresh(providerId);
+  } else if (source === 'claude') requestClaudeSubscriptionRefresh(providerId, true);
+  else requestXaiSubscriptionRefresh(providerId, true);
 }

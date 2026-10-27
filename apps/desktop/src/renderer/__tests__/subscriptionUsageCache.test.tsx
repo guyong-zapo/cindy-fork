@@ -28,6 +28,38 @@ for (const source of sources) {
       } } });
       return { reader, push: (value: unknown) => push?.(value) };
     }
+    // Unit r4389409976: new live-only recovery may queue behind an ordinary
+    // consumer, but clear/unmount must cancel it even while that consumer stays.
+    // The old owner/clear tests had no pending recovery request to cancel.
+    it.each(['clear', 'unmount'] as const)('cancels a live recovery reread after %s', async stop => {
+      let resolve!: (value: unknown) => void;
+      const { reader, push } = setup(vi.fn().mockImplementation(() => new Promise(done => { resolve = done; })));
+      const other = renderHook(() => source.hook(true));
+      const live = renderHook(({ enabled }) => source.hook(enabled, undefined, { live: true }),
+        { initialProps: { enabled: true } });
+      live.rerender({ enabled: false });
+      live.rerender({ enabled: true });
+      expect(reader).toHaveBeenCalledTimes(1);
+      if (stop === 'clear') act(() => push(null));
+      else live.unmount();
+      await act(async () => resolve(previous));
+      expect(reader).toHaveBeenCalledTimes(1);
+      expect(other.result.current).toBe(stop === 'clear' ? null : previous);
+    });
+
+    // Default consumers still supersede old reads; live queuing must stay opt-in.
+    it('retains latest-read priority for ordinary simultaneous consumers', async () => {
+      const replies: Array<(value: unknown) => void> = [];
+      setup(vi.fn().mockImplementation(() => new Promise(resolve => replies.push(resolve))));
+      const first = renderHook(() => source.hook(true));
+      const second = renderHook(() => source.hook(true));
+      expect(replies).toHaveLength(2);
+      await act(async () => replies[1](next));
+      await act(async () => replies[0](previous));
+      expect(first.result.current).toBe(next);
+      expect(second.result.current).toBe(next);
+    });
+
     it('reopens and re-enables synchronously with cached data during refresh failures', async () => {
       const { reader } = setup();
       const first = renderHook(({ enabled }) => source.hook(enabled), { initialProps: { enabled: true } });

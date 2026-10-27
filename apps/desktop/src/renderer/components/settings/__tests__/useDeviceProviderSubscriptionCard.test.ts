@@ -24,6 +24,9 @@ const mocks = vi.hoisted(() => ({
   remoteXai: [] as Array<[string | null, string | undefined]>,
   invoke: vi.fn(),
   readLocal: vi.fn(),
+  readClaude: vi.fn(),
+  readXai: vi.fn(),
+  realLocalSubscription: false,
   reopened: new Set<(event: { deviceId: string }) => void>(),
   presence: new Set<(snapshot: DeviceLinkPresenceSnapshot) => void>(),
   status: new Set<(snapshot: { status: 'stopped' | 'connecting' | 'online' }) => void>(),
@@ -36,20 +39,29 @@ const snapshot = (fiveHour: number) => ({
   updatedAt: 1,
 });
 
-vi.mock('@/hooks/useClaudeSubscriptionUsage', () => ({
-  useClaudeSubscriptionUsage: (enabled: boolean, providerId: string) => {
-    mocks.localClaude.push([enabled, providerId]);
-    return enabled ? snapshot(10) : null;
-  },
-}));
+vi.mock('@/hooks/useClaudeSubscriptionUsage', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/hooks/useClaudeSubscriptionUsage')>();
+  return {
+    ...actual,
+    useClaudeSubscriptionUsage: (...args: Parameters<typeof actual.useClaudeSubscriptionUsage>) => {
+      const [enabled, providerId = 'anthropic'] = args;
+      mocks.localClaude.push([enabled, providerId]);
+      const result = actual.useClaudeSubscriptionUsage(...args);
+      return mocks.realLocalSubscription ? result : enabled ? snapshot(10) : null;
+    },
+  };
+});
 vi.mock('@/hooks/useAccountUsage', async (importOriginal) => ({
   ...await importOriginal<typeof import('@/hooks/useAccountUsage')>(),
   useAccountUsage: () => null,
 }));
-vi.mock('@/hooks/useXaiSubscriptionUsage', () => ({
-  useXaiSubscriptionUsage: () => null,
-  requestXaiSubscriptionRefresh: vi.fn(),
-}));
+vi.mock('@/hooks/useXaiSubscriptionUsage', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/hooks/useXaiSubscriptionUsage')>();
+  return { ...actual, useXaiSubscriptionUsage: (...args: Parameters<typeof actual.useXaiSubscriptionUsage>) => {
+    const result = actual.useXaiSubscriptionUsage(...args);
+    return mocks.realLocalSubscription ? result : null;
+  } };
+});
 vi.mock('@/hooks/useRemoteClaudeSubscriptionUsage', () => ({
   useRemoteClaudeSubscriptionUsage: (deviceId: string | null, providerId?: string) => {
     mocks.remoteClaude.push([deviceId, providerId]);
@@ -105,11 +117,14 @@ beforeEach(() => {
   vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
   mocks.invoke.mockReset().mockResolvedValue(liveQuota());
   mocks.readLocal.mockReset();
+  mocks.readClaude.mockReset().mockResolvedValue(null);
+  mocks.readXai.mockReset().mockResolvedValue(null);
+  mocks.realLocalSubscription = false;
   mocks.reopened.clear();
   mocks.presence.clear();
   mocks.status.clear();
   mocks.codexUsage = null;
-  vi.stubGlobal('electronAPI', { maker: { usage: { getCodexRateLimits: mocks.readLocal } }, deviceLink: {
+  vi.stubGlobal('electronAPI', { maker: { usage: { getCodexRateLimits: mocks.readLocal, getClaudeSubscription: mocks.readClaude, getXaiSubscription: mocks.readXai } }, deviceLink: {
     invoke: mocks.invoke,
     onRemotePush: () => () => {},
     onPresenceChanged: (listener: (snapshot: DeviceLinkPresenceSnapshot) => void) => {
@@ -139,6 +154,34 @@ const remaining = (card: ReturnType<typeof useDeviceProviderSubscriptionCard>) =
   card?.windows.map((window) => [window.key, window.window.utilization]);
 
 describe('useDeviceProviderSubscriptionCard', () => {
+  // Unit r4389409976 / §10: prior local pending/resume coverage used Codex;
+  // Claude/xAI were mocked. Exercise the real subscription cache through the
+  // live card: keep the first success across hide/resume and a failed reread.
+  it.each(['claude', 'xai'] as const)('retains pending local %s quota across resume before a failed reread', async (source) => {
+    mocks.realLocalSubscription = true;
+    const reader = source === 'claude' ? mocks.readClaude : mocks.readXai;
+    const value = source === 'claude' ? snapshot(73) : {
+      creditUsagePercent: 73, planLabel: 'SuperGrok', updatedAt: Date.now(), resetsAt: Date.now() / 1000 + 3600,
+    };
+    let resolve!: (value: unknown) => void;
+    let reject!: (error: Error) => void;
+    reader.mockImplementationOnce(() => new Promise(done => { resolve = done; }))
+      .mockImplementationOnce(() => new Promise((_done, fail) => { reject = fail; }));
+    const account = source === 'claude' ? claude : provider('xai-local', { method: 'oauth', native: 'xai' });
+    const hook = renderHook(() => useDeviceProviderSubscriptionCard(account, null, { live: true }));
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    expect(reader).toHaveBeenCalledTimes(1);
+    await act(async () => resolve(value));
+    expect(hook.result.current?.windows[0]?.window.utilization).toBe(73);
+    expect(reader).toHaveBeenCalledTimes(2);
+    await act(async () => reject(new Error('quota temporarily unavailable')));
+    expect(hook.result.current?.windows[0]?.window.utilization).toBe(73);
+    expect(mocks.invoke).not.toHaveBeenCalled();
+  });
+
   // Unit r4389193568 / §10: existing resume tests started the live card's own
   // read. First expansion alongside an ordinary consumer must share its pending
   // RPC without queuing, including a second simultaneous live card.

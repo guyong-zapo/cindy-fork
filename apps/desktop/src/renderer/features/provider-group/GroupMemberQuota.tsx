@@ -52,6 +52,7 @@ export function GroupMemberQuota({
   const owner = getDataOwnerGeneration();
   const [relay, setRelay] = useState<{ owner: typeof owner; status: QuotaRelayStatus } | null>(null);
   const relayRef = useRef<typeof relay>(null);
+  const [control, setControl] = useState<{ owner: typeof owner; disabledDeviceIds: string[] } | null>(null);
   const [presence, setPresence] = useState<{
     deviceId: string;
     directory: typeof devices;
@@ -64,6 +65,16 @@ export function GroupMemberQuota({
     if (!deviceLink) return;
     let disposed = false;
     let revision = 0;
+    let controlRevision = 0;
+    const applyControl = (disabledDeviceIds: string[]) => {
+      if (!disposed && isDataOwnerGenerationCurrent(owner)) setControl({ owner, disabledDeviceIds });
+    };
+    // This local preference push is authoritative even if listDevices fails;
+    // target presence cannot restore a permission revoked on this computer.
+    const offControl = deviceLink.onControlTargetChanged?.(({ disabledControlDeviceIds }) => {
+      controlRevision++;
+      applyControl(disabledControlDeviceIds);
+    });
     const apply = (status: QuotaRelayStatus) => {
       if (disposed || !isDataOwnerGenerationCurrent(owner)) return;
       relayRef.current = { owner, status };
@@ -78,9 +89,10 @@ export function GroupMemberQuota({
     if (remoteTarget) {
       void deviceLink.getState?.().then(state => {
         if (revision === 0) apply(state.linkStatus);
+        if (controlRevision === 0) applyControl(state.disabledControlDeviceIds ?? []);
       }).catch(() => undefined);
     }
-    return () => { disposed = true; offStatus?.(); };
+    return () => { disposed = true; offStatus?.(); offControl?.(); };
   }, [owner, remoteTarget]);
   useEffect(() => {
     setPresence(null);
@@ -113,13 +125,14 @@ export function GroupMemberQuota({
   // During an unknown/failed directory refresh, an offline group row also wins
   // over retained online data until this target sends a fresh online presence.
   const quotaOffline = remoteTarget
-    ? relayStatus === 'stopped' || !device ||
+    ? (relayStatus !== null && relayStatus !== 'online') || !device ||
+      (targetDeviceId !== null && control?.owner === owner && control.disabledDeviceIds.includes(targetDeviceId)) ||
       (offline && directoryRequest.status !== 'ready' && currentPresence?.online !== true) ||
       !(currentPresence?.online ?? device.online) ||
       !(currentPresence?.remoteControlEnabled ?? device.remoteControlEnabled) || !device.controlEnabled
     : offline;
   // Unknown initial state cannot authorize a remote read from a cached group row.
-  const remoteDeviceId = target.kind === 'device' && relayStatus !== null && !quotaOffline ? target.deviceId : null;
+  const remoteDeviceId = target.kind === 'device' && relayStatus === 'online' && !quotaOffline ? target.deviceId : null;
   const { providers: localProviders } = useProviders();
   const deviceCatalog = useDeviceProviders(remoteDeviceId ?? undefined);
   const provider =

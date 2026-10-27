@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => ({
   devices: [] as Array<{ deviceId: string; online: boolean; remoteControlEnabled: boolean; controlEnabled: boolean }> | null,
   directoryStatus: 'ready' as 'ready' | 'loading' | 'error',
   presence: new Set<(snapshot: DeviceLinkPresenceSnapshot) => void>(),
+  control: new Set<(snapshot: { deviceId: string; enabled: boolean; disabledControlDeviceIds: string[] }) => void>(),
   status: new Set<(snapshot: { status: string }) => void>(),
   getState: vi.fn(),
 }));
@@ -72,9 +73,14 @@ beforeEach(() => {
   setDataOwnerGeneration('quota-owner');
   mocks.presence.clear();
   mocks.status.clear();
+  mocks.control.clear();
   mocks.getState.mockReset().mockResolvedValue({ linkStatus: 'online' });
   vi.stubGlobal('electronAPI', { deviceLink: {
     getState: mocks.getState,
+    onControlTargetChanged: (listener: (snapshot: { deviceId: string; enabled: boolean; disabledControlDeviceIds: string[] }) => void) => {
+      mocks.control.add(listener);
+      return () => mocks.control.delete(listener);
+    },
     onPresenceChanged: (listener: (snapshot: DeviceLinkPresenceSnapshot) => void) => {
       mocks.presence.add(listener);
       return () => mocks.presence.delete(listener);
@@ -99,6 +105,48 @@ afterEach(() => {
 });
 
 describe('GroupMemberQuota', () => {
+  // Unit r4389410005: an already-open online row missed local opt-out because
+  // listDevices failed and no presence announced the control preference change.
+  // Retain that local event across failed/new directory snapshots; online
+  // presence cannot grant control. Another device's preference is irrelevant.
+  it('stops reads on local control revocation even when the directory refresh fails', async () => {
+    let finishSeed!: (state: { linkStatus: string; disabledControlDeviceIds: string[] }) => void;
+    mocks.getState.mockReturnValue(new Promise(resolve => { finishSeed = resolve; }));
+    const view = () => <GroupMemberQuota id="quota" target={{ kind: 'device', deviceId: 'mini', providerId: 'anthropic-1a2b' }} offline={false} />;
+    const mounted = await mountQuota(view());
+    act(() => mocks.status.forEach(listener => listener({ status: 'online' })));
+    const control = (deviceId: string, enabled: boolean, disabledControlDeviceIds: string[]) => act(() => {
+      mocks.control.forEach(listener => listener({ deviceId, enabled, disabledControlDeviceIds }));
+    });
+    expect(screen.getByTestId('quota-card').textContent).toBe('Mini’s Claude');
+    control('other', false, ['other']);
+    expect(screen.getByTestId('quota-card').textContent).toBe('Mini’s Claude');
+    mocks.directoryStatus = 'loading';
+    control('mini', false, ['mini', 'other']);
+    const unread = () => {
+      expect(screen.getByText('providerGroup.member.quota.offline')).toBeTruthy();
+      expect(screen.queryByTestId('quota-card')).toBeNull();
+      expect(mocks.deviceReads.at(-1)).toBeUndefined();
+      expect(mocks.cardReads.at(-1)).toEqual([undefined, null]);
+    };
+    unread();
+    // A seed started before the revocation must not restore its old grant.
+    await act(async () => finishSeed({ linkStatus: 'online', disabledControlDeviceIds: [] }));
+    unread();
+    mocks.directoryStatus = 'error';
+    mounted.rerender(view());
+    act(() => mocks.presence.forEach(listener => listener({ deviceId: 'mini', online: true, remoteControlEnabled: true } as DeviceLinkPresenceSnapshot)));
+    unread();
+    mocks.devices = [...mocks.devices!];
+    mocks.directoryStatus = 'ready';
+    mounted.rerender(view());
+    unread();
+    control('mini', true, ['other']);
+    expect(screen.getByTestId('quota-card').textContent).toBe('Mini’s Claude');
+    mounted.unmount();
+    expect(mocks.control.size).toBe(0);
+  });
+
   // Unit r4389193553 / §10: the old offline-directory test missed a stale
   // online array retained after a missed pre-mount offline event + failed read.
   // Error/loading cannot override the group's offline row without fresh target
@@ -233,13 +281,15 @@ describe('GroupMemberQuota', () => {
   // must disable a previously online member even before the directory clears,
   // and keep it disabled after null replaces the directory. Existing stop
   // coverage used an already-offline directory and offline=true group state.
-  it('stops remote quota reads when relay stops despite stale online group and directory snapshots', async () => {
+  // r4389409994 also covers connecting: a retained online directory cannot
+  // authorize invoke while relay reconnects. The local card remains usable.
+  it.each(['stopped', 'connecting'] as const)('stops remote quota reads when relay is %s despite stale online group and directory snapshots', async (status) => {
     const online = [{ deviceId: 'mini', online: true, remoteControlEnabled: true, controlEnabled: true }];
     mocks.devices = online;
     const remote = () => <GroupMemberQuota id="quota" target={{ kind: 'device', deviceId: 'mini', providerId: 'anthropic-1a2b' }} offline={false} />;
     const mounted = await mountQuota(remote());
     expect(screen.getByTestId('quota-card').textContent).toBe('Mini’s Claude');
-    act(() => mocks.status.forEach(listener => listener({ status: 'stopped' })));
+    act(() => mocks.status.forEach(listener => listener({ status })));
     expect(screen.getByText('providerGroup.member.quota.offline')).toBeTruthy();
     expect(mocks.cardReads.at(-1)).toEqual([undefined, null]);
     expect(mocks.deviceReads.at(-1)).toBeUndefined();
