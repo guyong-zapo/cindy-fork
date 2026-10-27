@@ -27,6 +27,7 @@ const mocks = vi.hoisted(() => ({
   readClaude: vi.fn(),
   readXai: vi.fn(),
   realLocalSubscription: false,
+  realLocalAccount: false,
   realRemoteSubscription: false,
   reopened: new Set<(event: { deviceId: string }) => void>(),
   presence: new Set<(snapshot: DeviceLinkPresenceSnapshot) => void>(),
@@ -52,10 +53,13 @@ vi.mock('@/hooks/useClaudeSubscriptionUsage', async (importOriginal) => {
     },
   };
 });
-vi.mock('@/hooks/useAccountUsage', async (importOriginal) => ({
-  ...await importOriginal<typeof import('@/hooks/useAccountUsage')>(),
-  useAccountUsage: () => null,
-}));
+vi.mock('@/hooks/useAccountUsage', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/hooks/useAccountUsage')>();
+  return { ...actual, useAccountUsage: (...args: Parameters<typeof actual.useAccountUsage>) => {
+    const value = actual.useAccountUsage(...args);
+    return mocks.realLocalAccount ? value : null;
+  } };
+});
 vi.mock('@/hooks/useXaiSubscriptionUsage', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/hooks/useXaiSubscriptionUsage')>();
   return { ...actual, useXaiSubscriptionUsage: (...args: Parameters<typeof actual.useXaiSubscriptionUsage>) => {
@@ -128,6 +132,7 @@ beforeEach(() => {
   mocks.readClaude.mockReset().mockResolvedValue(null);
   mocks.readXai.mockReset().mockResolvedValue(null);
   mocks.realLocalSubscription = false;
+  mocks.realLocalAccount = false;
   mocks.realRemoteSubscription = false;
   mocks.reopened.clear();
   mocks.presence.clear();
@@ -748,6 +753,45 @@ describe('useDeviceProviderSubscriptionCard', () => {
       ? account('account-b', 82) : native('account-b', 91));
     await act(async () => { vi.advanceTimersByTime(15_000); });
     expect(remaining(hook.result.current)).toEqual([['primary', 91]]);
+  });
+
+  // Unit r4391955043 / §10: native-only recovery mocked the local account
+  // mirror away. A pending fallback/credits read must survive hide/resume;
+  // a failed follow-up must retain that first successful account payload.
+  it.each(['foreground', 'reopen'] as const)('retains the pending local Codex account fallback and credits across %s recovery', async resume => {
+    mocks.realLocalAccount = true;
+    const id = 'openai-account-live';
+    const openai = provider(id, { method: 'oauth', native: 'codex' });
+    const value = { providerId: id, primary: { usedPercent: 73, windowMinutes: 300 },
+      credits: { hasCredits: true, unlimited: false, balance: '17.50' } };
+    let finish!: (payload: typeof value) => void;
+    let fail!: (error: Error) => void;
+    const readAccount = vi.fn().mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }))
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject; }));
+    Object.assign(window.electronAPI.maker.usage, { getAccount: readAccount });
+    mocks.readLocal.mockRejectedValue(new Error('native quota unavailable'));
+    const renderCard = () => renderHook(() => useDeviceProviderSubscriptionCard(openai, null, { live: true }));
+    let card = renderCard();
+    await act(async () => {});
+    if (resume === 'reopen') {
+      card.unmount();
+      card = renderCard();
+    } else {
+      vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+      act(() => document.dispatchEvent(new Event('visibilitychange')));
+      vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+      act(() => document.dispatchEvent(new Event('visibilitychange')));
+    }
+    await act(async () => { vi.advanceTimersByTime(15_000); });
+    expect(readAccount).toHaveBeenCalledTimes(1); // Polling also shares the pending warm start.
+    await act(async () => finish(value));
+    expect(remaining(card.result.current)).toEqual([['primary', 73]]);
+    expect(card.result.current?.details).toContain('todaySpend.codex.creditsLine');
+    expect(readAccount).toHaveBeenCalledTimes(2);
+    await act(async () => fail(new Error('mirror temporarily unavailable')));
+    expect(remaining(card.result.current)).toEqual([['primary', 73]]);
+    expect(card.result.current?.details).toContain('todaySpend.codex.creditsLine');
+    expect(mocks.invoke).not.toHaveBeenCalled();
   });
 
   // Unit regression r4362108215 / provider-groups.md §10: remote recovery tests

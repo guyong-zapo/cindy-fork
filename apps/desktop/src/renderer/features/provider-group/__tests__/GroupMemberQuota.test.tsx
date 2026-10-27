@@ -299,12 +299,14 @@ describe('GroupMemberQuota', () => {
     readable();
   });
 
-  // Unit r4391647927 / §10: earlier cases kept offline=true throughout.
+  // Unit r4391647927 / r4391955018 / §10: earlier cases kept offline=true throughout.
   // A later group poll can report a new offline transition after directory
   // confirmation (and even online presence), while listDevices retains old rows.
   it.each([
     { status: 'loading', recovery: 'directory' },
     { status: 'error', recovery: 'presence' },
+    { status: 'ready', recovery: 'directory' },
+    { status: 'ready', recovery: 'presence' },
   ] as const)('invalidates older peer evidence on a new offline group state during $status', async ({ status, recovery }) => {
     let offline = false;
     const view = () => <GroupMemberQuota id="quota" target={{ kind: 'device', deviceId: 'mini', providerId: 'anthropic-1a2b' }} offline={offline} />;
@@ -333,7 +335,6 @@ describe('GroupMemberQuota', () => {
     expect(mocks.deviceReads.every(id => id === undefined)).toBe(true);
     expect(mocks.cardReads.every(([provider, id]) => provider === undefined && id === null)).toBe(true);
     emit('other');
-    mocks.devices = [...mocks.devices!];
     mounted.rerender(view());
     unread();
     if (recovery === 'presence') emit('mini');

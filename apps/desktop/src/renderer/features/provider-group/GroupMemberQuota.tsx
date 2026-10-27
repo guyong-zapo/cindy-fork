@@ -54,6 +54,7 @@ export function GroupMemberQuota({
   const owner = getDataOwnerGeneration();
   const confirmedDirectory = useRef<{ owner: typeof owner; deviceId: string } | null>(null);
   const previousGroupStatus = useRef({ owner, deviceId: targetDeviceId, offline });
+  const offlineRecovery = useRef<{ owner: typeof owner; deviceId: string | null; directory: typeof devices } | null>(null);
   const groupWentOffline = previousGroupStatus.current.owner === owner &&
     previousGroupStatus.current.deviceId === targetDeviceId && !previousGroupStatus.current.offline && offline;
   const [relay, setRelay] = useState<{
@@ -88,9 +89,12 @@ export function GroupMemberQuota({
     if (groupWentOffline) {
       confirmedDirectory.current = null;
       setPresence(null);
+      offlineRecovery.current = { owner, deviceId: targetDeviceId, directory: devices };
+    } else if (!offline || offlineRecovery.current?.owner !== owner || offlineRecovery.current.deviceId !== targetDeviceId) {
+      offlineRecovery.current = null;
     }
     previousGroupStatus.current = { owner, deviceId: targetDeviceId, offline };
-  }, [owner, targetDeviceId, offline, groupWentOffline]);
+  }, [owner, targetDeviceId, offline, groupWentOffline, devices]);
   useEffect(() => {
     const deviceLink = window.electronAPI?.deviceLink;
     if (!deviceLink) return;
@@ -167,6 +171,13 @@ export function GroupMemberQuota({
   // target push or a ready directory published after this relay generation.
   const awaitingPeer = relay?.owner === owner && relay.recovery &&
     (devices === relay.recovery.directory || directoryRequest.status !== 'ready') && currentPresence?.online !== true;
+  // A new offline group poll also invalidates an old ready/online directory.
+  // Keep that snapshot fenced until a subsequent successful list or target push.
+  const recovery = groupWentOffline ? { directory: devices } : offline &&
+    offlineRecovery.current?.owner === owner && offlineRecovery.current.deviceId === targetDeviceId
+      ? offlineRecovery.current : null;
+  const awaitingGroupPeer = recovery && (devices === recovery.directory || directoryRequest.status !== 'ready') &&
+    currentPresence?.online !== true;
   // Keep this target's successful directory evidence through unrelated refresh
   // loading/errors. It belongs to this owner/target/relay generation, and explicit
   // target offline/remote-control evidence invalidates it immediately.
@@ -176,10 +187,11 @@ export function GroupMemberQuota({
     if (relayStatus !== 'online' || !targetDeviceId || !device || !device.online || !device.remoteControlEnabled ||
       currentPresence?.online === false || currentPresence?.remoteControlEnabled === false) {
       confirmedDirectory.current = null;
-    } else if (directoryRequest.status === 'ready' && !awaitingPeer) {
+    } else if (directoryRequest.status === 'ready' && !awaitingPeer && !awaitingGroupPeer) {
       confirmedDirectory.current = { owner, deviceId: targetDeviceId };
     }
-  }, [owner, targetDeviceId, device, directoryRequest.status, relayStatus, awaitingPeer,
+    if (!awaitingGroupPeer) offlineRecovery.current = null;
+  }, [owner, targetDeviceId, device, directoryRequest.status, relayStatus, awaitingPeer, awaitingGroupPeer,
     currentPresence?.online, currentPresence?.remoteControlEnabled]);
   const controlEnabled = targetDeviceId !== null && control?.owner === owner
     ? !control.disabledDeviceIds.includes(targetDeviceId)
@@ -189,7 +201,7 @@ export function GroupMemberQuota({
   // During an unknown/failed directory refresh, an offline group row also wins
   // over unconfirmed retained online data until this target sends fresh evidence.
   const quotaOffline = remoteTarget
-    ? (relayStatus !== null && relayStatus !== 'online') || !device || awaitingPeer ||
+    ? (relayStatus !== null && relayStatus !== 'online') || !device || awaitingPeer || awaitingGroupPeer ||
       (offline && directoryRequest.status !== 'ready' && !directoryConfirmed && currentPresence?.online !== true) ||
       !(currentPresence?.online ?? device.online) ||
       !(currentPresence?.remoteControlEnabled ?? device.remoteControlEnabled) || !controlEnabled

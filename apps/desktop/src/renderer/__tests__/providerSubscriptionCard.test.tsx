@@ -111,6 +111,7 @@ describe('settings subscription card', () => {
       'app-server',
       undefined,
       'second-account',
+      {},
     );
   });
 });

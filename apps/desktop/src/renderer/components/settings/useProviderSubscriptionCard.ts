@@ -96,6 +96,7 @@ export function useProviderSubscriptionCard(
     'app-server',
     undefined,
     providerId,
+    options,
   );
   const claude = useClaudeSubscriptionUsage(source === 'claude', providerId, options);
   const xai = useXaiSubscriptionUsage(source === 'xai', providerId, options);
@@ -228,7 +229,7 @@ function refreshSubscriptionCard(
     } else requestRemoteXaiSubscriptionRefresh(deviceId, providerId, false, scheduling);
   } else if (source === 'codex') {
     requestCodexRateLimitsRefresh(providerId);
-    requestCodexAccountRefresh(providerId);
+    requestCodexAccountRefresh(providerId, true);
   } else if (source === 'claude') requestClaudeSubscriptionRefresh(providerId, true);
   else requestXaiSubscriptionRefresh(providerId, true);
 }

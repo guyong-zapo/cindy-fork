@@ -143,6 +143,70 @@ it('xAI instantaneous limits reselect cached pushes without adding a reader', ()
   expect(hook.result.current).toBeNull();
 });
 
+// Unit r4391955043: account warm starts previously had no live observation
+// coverage. Exercise the real hook with another ordinary subscriber retained;
+// only the recovering card owns its queued reread, and identity changes fence it.
+it.each(['close', 'clear', 'owner', 'provider'] as const)('cancels a live Codex account recovery queue on %s', async stop => {
+  setDataOwnerGeneration(`account-live-${stop}`);
+  const value = (id: string, usedPercent: number) => ({ providerId: id, primary: { usedPercent } });
+  const pushes = new Map<string, Set<(payload: unknown) => void>>();
+  let finish!: (payload: unknown) => void;
+  const reader = vi.fn().mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }))
+    .mockImplementation((_kind, id: string) => Promise.resolve(value(id, 96)));
+  vi.stubGlobal('electronAPI', { maker: { usage: {
+    getAccount: reader,
+    onCodexAccountChanged: (callback: (payload: unknown) => void, id: string) => {
+      const listeners = pushes.get(id) ?? new Set();
+      listeners.add(callback); pushes.set(id, listeners);
+      return () => listeners.delete(callback);
+    },
+  } } });
+  const id = 'openai-live-account';
+  const ordinary = renderHook(() => useAccountUsage(undefined, 'codex', 'app-server', undefined, id));
+  const live = renderHook(({ enabled, providerId }) => useAccountUsage(undefined, enabled ? 'codex' : undefined,
+    'app-server', undefined, providerId, { live: true }), { initialProps: { enabled: true, providerId: id } });
+  const second = renderHook(() => useAccountUsage(undefined, 'codex', 'app-server', undefined, id, { live: true }));
+  expect(reader).toHaveBeenCalledTimes(1); // Ordinary + first two live cards share.
+  live.rerender({ enabled: false, providerId: id });
+  live.rerender({ enabled: true, providerId: id }); // One queued recovery behind the first read.
+  expect(reader).toHaveBeenCalledTimes(1);
+  if (stop === 'close') {
+    ordinary.unmount(); // The remaining live card still owns the shared result.
+    live.unmount();
+  }
+  else if (stop === 'clear') act(() => pushes.get(id)?.forEach(push => push(null)));
+  else {
+    if (stop === 'owner') setDataOwnerGeneration('next-account-owner');
+    live.rerender({ enabled: true, providerId: stop === 'provider' ? 'openai-other' : id });
+    await act(async () => {});
+    expect(live.result.current?.primary?.usedPercent).toBe(96);
+  }
+  await act(async () => finish(value(id, 73)));
+  expect(reader).toHaveBeenCalledTimes(stop === 'close' || stop === 'clear' ? 1 : 2);
+  if (stop === 'close' || stop === 'provider') {
+    if (stop === 'provider') expect(ordinary.result.current?.primary?.usedPercent).toBe(73);
+    expect(second.result.current?.primary?.usedPercent).toBe(73);
+  } else expect(ordinary.result.current).toBeNull();
+  if (stop === 'clear') expect(live.result.current).toBeNull();
+  if (stop === 'owner' || stop === 'provider') expect(live.result.current?.primary?.usedPercent).toBe(96);
+});
+
+// The optional live path must not change a normal chip's cancelled warm start.
+it('keeps ordinary Codex warm-start cancellation when no live card shared it', async () => {
+  setDataOwnerGeneration('ordinary-account-cancel');
+  let finish!: (payload: unknown) => void;
+  const reader = vi.fn().mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }))
+    .mockRejectedValue(new Error('temporarily unavailable'));
+  vi.stubGlobal('electronAPI', { maker: { usage: { getAccount: reader } } });
+  const hook = renderHook(({ enabled }) => useAccountUsage(undefined, enabled ? 'codex' : undefined),
+    { initialProps: { enabled: true } });
+  hook.rerender({ enabled: false });
+  hook.rerender({ enabled: true });
+  expect(reader).toHaveBeenCalledTimes(2);
+  await act(async () => finish({ primary: { usedPercent: 73 } }));
+  expect(hook.result.current).toBeNull();
+});
+
 it('OpenAI status quota reselects account/source caches and ignores pre-push reads', async () => {
   const pushes = new Map<string, Array<(value: unknown) => void>>();
   let resolve!: (value: unknown) => void;
