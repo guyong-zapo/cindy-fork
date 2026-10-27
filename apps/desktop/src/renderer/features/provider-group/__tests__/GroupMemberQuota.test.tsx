@@ -22,13 +22,17 @@ const mocks = vi.hoisted(() => ({
   cardReads: [] as Array<[string | undefined, string | null]>,
   cards: {} as Record<string, { title: string }>,
   devices: [] as Array<{ deviceId: string; online: boolean; remoteControlEnabled: boolean; controlEnabled: boolean }> | null,
+  directoryStatus: 'ready' as 'ready' | 'loading' | 'error',
   presence: new Set<(snapshot: DeviceLinkPresenceSnapshot) => void>(),
   status: new Set<(snapshot: { status: string }) => void>(),
   getState: vi.fn(),
 }));
 
 vi.mock('@/hooks/useProviders', () => ({ useProviders: () => ({ providers: mocks.local }) }));
-vi.mock('@/features/device-link/useDeviceLinkDeviceList', () => ({ useDeviceLinkDeviceList: () => mocks.devices }));
+vi.mock('@/features/device-link/useDeviceLinkDeviceList', () => ({
+  useDeviceLinkDeviceList: () => mocks.devices,
+  useDeviceLinkDeviceListRequestState: () => ({ status: mocks.directoryStatus, error: mocks.directoryStatus === 'error' ? 'offline' : null }),
+}));
 vi.mock('@/hooks/useDeviceProviders', () => ({
   useDeviceProviders: (deviceId?: string) => {
     mocks.deviceReads.push(deviceId);
@@ -80,6 +84,7 @@ beforeEach(() => {
       return () => mocks.status.delete(listener);
     },
   } });
+  mocks.directoryStatus = 'ready';
   mocks.devices = ['mini', 'pc'].map(deviceId => ({ deviceId, online: true, remoteControlEnabled: true, controlEnabled: true }));
   mocks.local = [claude('anthropic')];
   mocks.byDevice = { mini: [claude('anthropic-1a2b')], pc: [apiKey('openrouter')] };
@@ -94,6 +99,38 @@ afterEach(() => {
 });
 
 describe('GroupMemberQuota', () => {
+  // Unit r4389193553 / §10: the old offline-directory test missed a stale
+  // online array retained after a missed pre-mount offline event + failed read.
+  // Error/loading cannot override the group's offline row without fresh target
+  // presence; neither a cached provider nor an unrelated peer can enable reads.
+  it.each(['error', 'loading'] as const)('keeps a stale-online directory unread while its request is %s', async (status) => {
+    mocks.directoryStatus = status;
+    const view = () => <GroupMemberQuota id="quota" target={{ kind: 'device', deviceId: 'mini', providerId: 'anthropic-1a2b' }} offline />;
+    const mounted = await mountQuota(view());
+    const unread = () => {
+      expect(screen.getByText('providerGroup.member.quota.offline')).toBeTruthy();
+      expect(screen.queryByTestId('quota-card')).toBeNull();
+      expect(mocks.deviceReads.at(-1)).toBeUndefined();
+      expect(mocks.cardReads.at(-1)).toEqual([undefined, null]);
+    };
+    unread();
+    const emit = (deviceId: string, online: boolean) => act(() => mocks.presence.forEach(listener => listener({
+      deviceId, online, remoteControlEnabled: true,
+      deviceName: 'Mini', platform: 'darwin', appVersion: 'test', lastSeenAt: 1, busy: false,
+    })));
+    emit('other', true);
+    unread();
+    emit('mini', true);
+    expect(screen.getByTestId('quota-card').textContent).toBe('Mini’s Claude');
+    emit('mini', false);
+    unread();
+    // A fresh authoritative directory can recover independently of group cache.
+    mocks.directoryStatus = 'ready';
+    mocks.devices = [...mocks.devices!];
+    mounted.rerender(view());
+    expect(screen.getByTestId('quota-card').textContent).toBe('Mini’s Claude');
+  });
+
   // Unit regression r4388475435 / provider-groups.md §10: the old tests
   // supplied permissions only after recovery. A cached online group + online
   // relay must not show quota or read a peer without a matching directory row,

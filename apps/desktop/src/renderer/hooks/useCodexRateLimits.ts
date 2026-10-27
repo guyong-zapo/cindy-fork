@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useRef, useSyncExternalStore } from 'react';
 import { getDataOwnerGeneration, isDataOwnerGenerationCurrent } from '@/contexts/dataOwnerGeneration';
 
 import type { MobileCodexRateLimitsResult } from '@cindy/maker-shared/device-link-contract';
@@ -59,6 +59,8 @@ interface CachedRateLimits {
   snapshot: MobileCodexRateLimitsResult | null;
   version: number;
   pendingReads: number;
+  liveObservers: number;
+  hasLiveObservation: boolean;
   queuedRefreshes: Set<{ version: number }>;
   listeners: Set<() => void>;
   unsubscribe: Array<() => void>;
@@ -107,7 +109,7 @@ function cachedRateLimits(providerId: string): CachedRateLimits {
   const cached = snapshots.get(providerId);
   if (cached) return cached;
   const entry: CachedRateLimits = {
-    providerId, owner, snapshot: null, version: 0, pendingReads: 0, queuedRefreshes: new Set(), listeners: new Set(), unsubscribe: [],
+    providerId, owner, snapshot: null, version: 0, pendingReads: 0, liveObservers: 0, hasLiveObservation: false, queuedRefreshes: new Set(), listeners: new Set(), unsubscribe: [],
     awaitingAuthCompletion: false,
   };
   snapshots.set(providerId, entry);
@@ -158,10 +160,11 @@ export function requestCodexRateLimitsRefresh(providerId = 'openai'): void {
 export function useCodexRateLimits(
   enabled: boolean,
   providerId = 'openai',
-  options: { queueIfPending?: boolean } = {},
+  options: { live?: boolean } = {},
 ): CodexRateLimitsState {
-  const queueIfPending = options.queueIfPending === true;
+  const live = options.live === true;
   const entry = cachedRateLimits(providerId);
+  const lastLiveEntry = useRef<CachedRateLimits | null>(null);
   const subscribe = useCallback((listener: () => void) => {
     if (!enabled) return () => {};
     entry.listeners.add(listener);
@@ -174,14 +177,28 @@ export function useCodexRateLimits(
   }, [enabled, entry]);
   useEffect(() => {
     if (!enabled) return;
-    // A resumed card keeps the pending result, then reads once more. Explicit
-    // refresh/auth events may still supersede it and invalidate this queue.
-    if (queueIfPending && entry.pendingReads > 0) {
-      const request = { version: entry.version };
-      entry.queuedRefreshes.add(request);
-      return () => { entry.queuedRefreshes.delete(request); };
+    // First expansion shares an ordinary consumer's pending read. A card that
+    // resumes, or reopens after the last live observer left, queues one reread.
+    // Keep the gap on the entry because collapse discards the card's hook/ref,
+    // while an ordinary details/spend consumer may still keep the RPC alive.
+    const resumed = live && (lastLiveEntry.current === entry ||
+      (entry.hasLiveObservation && entry.liveObservers === 0));
+    if (live) {
+      entry.liveObservers++;
+      entry.hasLiveObservation = true;
+      lastLiveEntry.current = entry;
     }
-    refreshEntry(entry);
-  }, [enabled, entry, queueIfPending]);
+    let request: { version: number } | undefined;
+    if (live && entry.pendingReads > 0) {
+      if (resumed) {
+        request = { version: entry.version };
+        entry.queuedRefreshes.add(request);
+      }
+    } else refreshEntry(entry);
+    return () => {
+      if (live) entry.liveObservers--;
+      if (request) entry.queuedRefreshes.delete(request);
+    };
+  }, [enabled, entry, live]);
   return { snapshot, refresh };
 }

@@ -12,7 +12,7 @@ import { QuotaHoverCard } from '@/components/status/QuotaHoverCard';
 import { providerWeeklyQuotaSource } from '@/components/new-chat/useProviderWeeklyQuota';
 import { useDeviceProviders } from '@/hooks/useDeviceProviders';
 import { useProviders } from '@/hooks/useProviders';
-import { useDeviceLinkDeviceList } from '@/features/device-link/useDeviceLinkDeviceList';
+import { useDeviceLinkDeviceList, useDeviceLinkDeviceListRequestState } from '@/features/device-link/useDeviceLinkDeviceList';
 import { getDataOwnerGeneration, isDataOwnerGenerationCurrent } from '@/contexts/dataOwnerGeneration';
 import { cn } from '@/lib/utils';
 
@@ -46,6 +46,7 @@ export function GroupMemberQuota({
   // The group's cached status can lag a reconnect; the shared device list lets
   // quota reads recover without waiting for that cache and the next group poll.
   const devices = useDeviceLinkDeviceList();
+  const directoryRequest = useDeviceLinkDeviceListRequestState();
   const targetDeviceId = target.kind === 'device' ? target.deviceId : null;
   const remoteTarget = target.kind === 'device';
   const owner = getDataOwnerGeneration();
@@ -109,8 +110,12 @@ export function GroupMemberQuota({
   const relayStatus = relay && isDataOwnerGenerationCurrent(relay.owner) ? relay.status : null;
   // A cached group row or presence push cannot supply the local control grant.
   // Missing directory permissions must stop both provider and quota reads.
+  // During an unknown/failed directory refresh, an offline group row also wins
+  // over retained online data until this target sends a fresh online presence.
   const quotaOffline = remoteTarget
-    ? relayStatus === 'stopped' || !device || !(currentPresence?.online ?? device.online) ||
+    ? relayStatus === 'stopped' || !device ||
+      (offline && directoryRequest.status !== 'ready' && currentPresence?.online !== true) ||
+      !(currentPresence?.online ?? device.online) ||
       !(currentPresence?.remoteControlEnabled ?? device.remoteControlEnabled) || !device.controlEnabled
     : offline;
   // Unknown initial state cannot authorize a remote read from a cached group row.

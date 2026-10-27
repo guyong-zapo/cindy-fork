@@ -83,7 +83,7 @@ export function buildSettingsCodexUsageCard(
 
 export function useProviderSubscriptionCard(
   provider?: ProviderView,
-  options: { queueIfPending?: boolean } = {},
+  options: { live?: boolean } = {},
 ): UsageCardAccount | null {
   const { t, i18n } = useTranslation();
   // Suspension only disables routing; settings must still show the saved account.
@@ -191,7 +191,7 @@ export function useDeviceProviderSubscriptionCard(
   );
   const previousEpoch = useRef(epoch);
   const local = useProviderSubscriptionCard(deviceId === null ? activeProvider : undefined, {
-    queueIfPending: options.live === true,
+    live: options.live === true,
   });
   const remote = useRemoteProviderSubscriptionCard(
     deviceId === null ? undefined : activeProvider,

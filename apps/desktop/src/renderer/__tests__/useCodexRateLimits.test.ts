@@ -38,7 +38,7 @@ describe('useCodexRateLimits', () => {
       onCodexAccountChanged: (callback: (payload: unknown) => void) => { clear = callback; return vi.fn(); },
     } } });
     const other = renderHook(() => useCodexRateLimits(true));
-    const hook = renderHook(({ enabled }) => useCodexRateLimits(enabled, 'openai', { queueIfPending: true }),
+    const hook = renderHook(({ enabled }) => useCodexRateLimits(enabled, 'openai', { live: true }),
       { initialProps: { enabled: true } });
     hook.rerender({ enabled: false });
     hook.rerender({ enabled: true });

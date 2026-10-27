@@ -77,6 +77,7 @@ import { useDeviceProviderSubscriptionCard } from '../useProviderSubscriptionCar
 import { resetRemoteDeviceUsageMirrorsForTest } from '@/hooks/useRemoteDeviceUsage';
 import { useProviderUsageSnapshots, useProviderWeeklyQuota } from '../../new-chat/useProviderWeeklyQuota';
 import { matchCodexBucketForModel } from '@cindy/maker-shared/codex-usage-buckets';
+import { useCodexRateLimits } from '@/hooks/useCodexRateLimits';
 import { installHiddenAnimationGate } from '@/lib/hiddenAnimationGate';
 
 function provider(id: string, auth: Record<string, unknown>): ProviderView {
@@ -138,6 +139,40 @@ const remaining = (card: ReturnType<typeof useDeviceProviderSubscriptionCard>) =
   card?.windows.map((window) => [window.key, window.window.utilization]);
 
 describe('useDeviceProviderSubscriptionCard', () => {
+  // Unit r4389193568 / §10: existing resume tests started the live card's own
+  // read. First expansion alongside an ordinary consumer must share its pending
+  // RPC without queuing, including a second simultaneous live card.
+  it('shares an ordinary pending local read on first expansion without a trailing RPC', async () => {
+    const native = { account: { planType: 'plus' }, rateLimits: { primary: { usedPercent: 91, windowMinutes: 300 } } };
+    let resolve!: (value: typeof native) => void;
+    mocks.readLocal.mockImplementation(() => new Promise(done => { resolve = done; }));
+    const other = renderHook(() => useCodexRateLimits(true));
+    const first = renderHook(() => useDeviceProviderSubscriptionCard(codex, null, { live: true }));
+    const second = renderHook(() => useDeviceProviderSubscriptionCard(codex, null, { live: true }));
+    expect(mocks.readLocal).toHaveBeenCalledTimes(1);
+    await act(async () => resolve(native));
+    expect(other.result.current.snapshot).toBe(native);
+    expect(remaining(first.result.current)).toEqual([['primary', 91]]);
+    expect(remaining(second.result.current)).toEqual([['primary', 91]]);
+    expect(mocks.readLocal).toHaveBeenCalledTimes(1);
+  });
+
+  // A collapsed card loses its hook instance while an ordinary subscriber can
+  // keep the request alive. Reopening must still queue exactly one recovery read.
+  it('queues a local reread on reexpansion while an ordinary consumer keeps the old request alive', async () => {
+    const native = (usedPercent: number) => ({ account: { planType: 'plus' }, rateLimits: { primary: { usedPercent, windowMinutes: 300 } } });
+    let resolve!: (value: ReturnType<typeof native>) => void;
+    mocks.readLocal.mockImplementationOnce(() => new Promise(done => { resolve = done; })).mockResolvedValue(native(96));
+    renderHook(() => useCodexRateLimits(true));
+    const first = renderHook(() => useDeviceProviderSubscriptionCard(codex, null, { live: true }));
+    first.unmount();
+    const reopened = renderHook(() => useDeviceProviderSubscriptionCard(codex, null, { live: true }));
+    expect(mocks.readLocal).toHaveBeenCalledTimes(1);
+    await act(async () => resolve(native(91)));
+    expect(mocks.readLocal).toHaveBeenCalledTimes(2);
+    expect(remaining(reopened.result.current)).toEqual([['primary', 96]]);
+  });
+
   // Unit r4388718323: a native capability denial must retain its ordinary 15m
   // backoff, but an actual reconnect probes once per shared device/account.
   // Cover both a settled denial and a pre-reconnect request rejecting late.
