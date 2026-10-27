@@ -271,6 +271,72 @@ describe('useDeviceProviderSubscriptionCard', () => {
     }
   });
 
+  // Unit r4391177398 / §10: live fallback recovery reused the native mirror's
+  // negative capability TTL, so upgrading/reopening a peer stayed unread for 15m.
+  // Real card/mirrors must probe on recovery, including a late unsupported reply,
+  // while periodic reads keep their backoff and a closed card cancels its probe.
+  it.each(['claude', 'xai', 'codex'] as const)('reprobes unsupported %s live quota on recovery', async source => {
+    mocks.realRemoteSubscription = true;
+    const id = source === 'claude' ? 'anthropic' : source === 'xai' ? 'xai' : 'openai';
+    const account = provider(id, { method: 'oauth', native: source });
+    const channel = source === 'claude' ? 'maker:usage:claude-subscription' : source === 'xai' ? 'maker:usage:xai-subscription' : 'maker:usage:account';
+    const value = source === 'claude' ? snapshot(82) : source === 'xai' ? {
+      creditUsagePercent: 82, planLabel: 'SuperGrok', updatedAt: Date.now(), resetsAt: Date.now() / 1000 + 3600,
+    } : { primary: { usedPercent: 82, windowMinutes: 300 } };
+    const unsupported = () => new Error('[DEVICE_LINK_CHANNEL_NOT_ALLOWED] old host');
+    for (const mode of ['settled', 'pending', 'cancel'] as const) {
+      setDataOwnerGeneration(`unsupported-${source}-${mode}`);
+      let reject!: (error: Error) => void;
+      let reads = 0;
+      mocks.invoke.mockImplementation((_device, requested) => {
+        if (requested !== channel) return Promise.reject(unsupported());
+        reads++;
+        if (reads === 1) return new Promise((_resolve, fail) => { reject = fail; });
+        if (mode === 'settled' && reads === 2) return Promise.reject(unsupported());
+        return Promise.resolve(value);
+      });
+      const other = renderHook(() => ({
+        claude: useRemoteClaudeSubscriptionUsage(source === 'claude' ? 'mini' : null, id),
+        xai: useRemoteXaiSubscriptionUsage(source === 'xai' ? 'mini' : null, id),
+        codex: useRemoteCodexAccountUsage(source === 'codex' ? 'mini' : null, id),
+      }));
+      const renderCard = () => renderHook(() => useDeviceProviderSubscriptionCard(account, 'mini', { live: true }));
+      let card = renderCard();
+      await act(async () => {});
+      expect(reads).toBe(1);
+      if (mode === 'settled') {
+        await act(async () => reject(unsupported()));
+        await act(async () => { vi.advanceTimersByTime(30_000); });
+        expect(reads).toBe(1); // Ordinary live polling keeps the 15-minute TTL.
+      }
+      act(() => { for (const listener of mocks.reopened) listener({ deviceId: 'unrelated' }); });
+      expect(reads).toBe(1);
+      await act(async () => { for (const listener of mocks.reopened) listener({ deviceId: 'mini' }); });
+      if (mode === 'settled') {
+        expect(reads).toBe(2); // Retry promptly, then back off if still unsupported.
+        await act(async () => { vi.advanceTimersByTime(30_000); });
+        expect(reads).toBe(2);
+        await act(async () => { for (const listener of mocks.reopened) listener({ deviceId: 'mini' }); });
+        expect(reads).toBe(3);
+      } else {
+        expect(reads).toBe(1);
+        if (mode === 'cancel') card.unmount();
+        await act(async () => reject(unsupported()));
+        expect(reads).toBe(mode === 'cancel' ? 1 : 2);
+        if (mode === 'cancel') {
+          expect(other.result.current[source]).toBeNull();
+          card = renderCard();
+          await act(async () => {});
+          expect(reads).toBe(2); // Reopening explicitly retries the capability.
+        }
+      }
+      expect(card.result.current?.windows[0]?.window.utilization).toBe(82);
+      expect(other.result.current[source]).toEqual(value);
+      card.unmount();
+      other.unmount();
+    }
+  });
+
   // Unit r4389409976 / §10: prior local pending/resume coverage used Codex;
   // Claude/xAI were mocked. Exercise the real subscription cache through the
   // live card: keep the first success across hide/resume and a failed reread.

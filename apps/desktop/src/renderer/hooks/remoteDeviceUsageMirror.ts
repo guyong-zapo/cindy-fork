@@ -156,8 +156,9 @@ export function createRemoteDeviceUsageMirror<T extends object>(cfg: {
         if (entry.refreshQueued || liveQueued) {
           const queuedScheduling = liveQueued ? undefined : entry.refreshScheduling;
           // An old in-flight request can install a negative capability cache
-          // after reconnect. Only the queued recovery probe bypasses that TTL.
-          const retrySupport = entry.refreshSupportProbe;
+          // after reconnect. Native probes and still-observed live recovery
+          // tokens bypass that TTL; cancelling the card removes its token.
+          const retrySupport = entry.refreshSupportProbe || liveQueued;
           entry.refreshSupportProbe = false;
           entry.refreshQueued = false;
           entry.refreshScheduling = undefined;
@@ -232,7 +233,9 @@ export function createRemoteDeviceUsageMirror<T extends object>(cfg: {
       // can keep visibilityState "visible" while active turns disable throttling.
       const visible = () => document.visibilityState !== 'hidden'
         && !document.documentElement.hasAttribute(HIDDEN_ANIMATION_ATTR);
-      if ((!settled || resumed) && (!cfg.refreshIntervalMs || visible())) request(deviceId, providerId, resumePending, undefined, cfg.refreshOnReconnect && firstObserver);
+      // An explicit live recovery rechecks capabilities; ordinary polling still
+      // respects the negative cache, including after another unsupported reply.
+      if ((!settled || resumed) && (!cfg.refreshIntervalMs || visible())) request(deviceId, providerId, resumePending, undefined, resumed || (cfg.refreshOnReconnect && firstObserver));
       let timer: ReturnType<typeof setInterval> | undefined;
       const poll = () => {
         if (!isDataOwnerGenerationCurrent(entry.owner) || !visible()) return;
