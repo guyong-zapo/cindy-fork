@@ -555,6 +555,37 @@ describe('GroupMemberQuota', () => {
     expect(mocks.deviceReads.every((deviceId) => deviceId === undefined)).toBe(true);
   });
 
+  // Unit r4391443314 / §10: a remote owner's cached offline status can
+  // describe this viewing computer. Existing local coverage only used offline=false.
+  // Resolve the actual member mapping, then render quota without any usable peer
+  // directory: local data must recover immediately and never query the group owner.
+  it('reads a self member locally despite the remote owner’s stale offline state', async () => {
+    const target = groupMemberQuotaTarget({ kind: 'device', agentDeviceId: 'this-computer', providerId: 'anthropic' }, 'group-owner', 'this-computer');
+    expect(target).toEqual({ kind: 'local', providerId: 'anthropic' });
+    mocks.devices = null;
+    mocks.directoryStatus = 'error';
+    const view = () => <GroupMemberQuota id="quota" target={target} offline />;
+    const mounted = await mountQuota(view());
+    const readable = () => {
+      expect(screen.getByTestId('quota-card').textContent).toBe('This computer’s Claude');
+      expect(mocks.cardReads.at(-1)).toEqual(['anthropic', null]);
+      expect(mocks.deviceReads.every(id => id === undefined)).toBe(true);
+    };
+    readable();
+    for (const status of ['connecting', 'stopped', 'online']) {
+      act(() => mocks.status.forEach(listener => listener({ status })));
+      readable(); // Relay availability does not gate this computer's own data.
+    }
+    expect(mocks.getState).not.toHaveBeenCalled();
+    mocks.local = [claude('another-account')];
+    mounted.rerender(view());
+    expect(screen.queryByTestId('quota-card')).toBeNull();
+    expect(mocks.cardReads.at(-1)).toEqual([undefined, null]);
+    mocks.local = [claude('anthropic')];
+    mounted.rerender(view());
+    readable(); // Local account recovery does not wait for the owner's next poll.
+  });
+
   it('reads my other computer’s own account through its directory', async () => {
     await show({ kind: 'device', deviceId: 'mini', providerId: 'anthropic-1a2b' });
     expect(screen.getByTestId('quota-card').textContent).toBe('Mini’s Claude');

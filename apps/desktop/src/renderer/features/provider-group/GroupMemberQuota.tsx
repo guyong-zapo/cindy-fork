@@ -36,7 +36,7 @@ export function GroupMemberQuota({
 }: {
   id: string;
   target: GroupMemberQuotaTarget;
-  /** 组里报这台不在线：设备在线状态尚未恢复时不去读，直接说明。 */
+  /** 组里缓存的离线状态；远端须核验设备证据，本机直接使用当前本地账号。 */
   offline: boolean;
   /** 左侧缩进，让卡片内容与行里的电脑名对齐(卡片自带 16px 内边距)。 */
   inset?: string;
@@ -181,7 +181,7 @@ export function GroupMemberQuota({
       (offline && directoryRequest.status !== 'ready' && !directoryConfirmed && currentPresence?.online !== true) ||
       !(currentPresence?.online ?? device.online) ||
       !(currentPresence?.remoteControlEnabled ?? device.remoteControlEnabled) || !controlEnabled
-    : offline;
+    : target.kind === 'local' ? false : offline;
   // Unknown initial state cannot authorize a remote read from a cached group row.
   const remoteDeviceId = target.kind === 'device' && relayStatus === 'online' && !quotaOffline ? target.deviceId : null;
   const { providers: localProviders } = useProviders();
