@@ -187,6 +187,7 @@ export function useDeviceProviderSubscriptionCard(
   const providerId = activeProvider?.id;
   const epoch = useDeviceLinkReconnectEpoch(
     options.live && source ? deviceId ?? undefined : undefined,
+    options.live ? true : undefined,
   );
   const previousEpoch = useRef(epoch);
   const local = useProviderSubscriptionCard(deviceId === null ? activeProvider : undefined, {
@@ -211,7 +212,8 @@ export function useDeviceProviderSubscriptionCard(
     // Mirrors own mount/resume reads, including queuing behind an old pending
     // read. Only a reconnect observed while mounted needs another refresh here.
     if (reconnected && options.live && source && providerId && deviceId) {
-      refreshSubscriptionCard(source, providerId, deviceId, true);
+      // The shared native mirror owns its one-per-entry reconnect probe.
+      refreshSubscriptionCard(source, providerId, deviceId, true, undefined, false);
     }
   }, [options.live, source, providerId, deviceId, epoch]);
   return deviceId === null ? local : remote;
@@ -223,10 +225,11 @@ function refreshSubscriptionCard(
   deviceId: string | null,
   queueIfPending = false,
   scheduling?: { background?: boolean },
+  refreshNative = true,
 ): void {
   if (deviceId) {
     if (source === 'codex') {
-      requestRemoteCodexRateLimitsRefresh(deviceId, providerId, queueIfPending, scheduling);
+      if (refreshNative) requestRemoteCodexRateLimitsRefresh(deviceId, providerId, queueIfPending, scheduling);
       requestRemoteCodexAccountRefresh(deviceId, providerId, queueIfPending, scheduling);
     } else if (source === 'claude') {
       requestRemoteClaudeSubscriptionRefresh(deviceId, providerId, queueIfPending, scheduling);

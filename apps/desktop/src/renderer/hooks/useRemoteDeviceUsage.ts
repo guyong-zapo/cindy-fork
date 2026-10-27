@@ -50,6 +50,7 @@ const codexAccountMirror = createRemoteDeviceUsageMirror<RemoteCodexAccountUsage
   providerPushChannel: 'usage:codex-provider-account-changed',
 });
 const codexNativeRateLimitsMirror = createRemoteDeviceUsageMirror<MobileCodexRateLimitsResult>({
+  refreshOnReconnect: true,
   invokeChannel: 'maker:usage:codex-rate-limits',
   pushChannel: 'usage:codex-account-changed',
   defaultProviderId: 'openai',

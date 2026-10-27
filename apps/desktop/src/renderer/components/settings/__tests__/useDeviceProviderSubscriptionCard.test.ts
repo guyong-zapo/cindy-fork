@@ -25,6 +25,8 @@ const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
   readLocal: vi.fn(),
   reopened: new Set<(event: { deviceId: string }) => void>(),
+  presence: new Set<(snapshot: DeviceLinkPresenceSnapshot) => void>(),
+  status: new Set<(snapshot: { status: 'stopped' | 'connecting' | 'online' }) => void>(),
   codexUsage: null as Record<string, unknown> | null,
 }));
 
@@ -103,12 +105,18 @@ beforeEach(() => {
   mocks.invoke.mockReset().mockResolvedValue(liveQuota());
   mocks.readLocal.mockReset();
   mocks.reopened.clear();
+  mocks.presence.clear();
+  mocks.status.clear();
   mocks.codexUsage = null;
   vi.stubGlobal('electronAPI', { maker: { usage: { getCodexRateLimits: mocks.readLocal } }, deviceLink: {
     invoke: mocks.invoke,
     onRemotePush: () => () => {},
-    onPresenceChanged: () => () => {},
-    onStatusChanged: () => () => {},
+    onPresenceChanged: (listener: (snapshot: DeviceLinkPresenceSnapshot) => void) => {
+      mocks.presence.add(listener); return () => mocks.presence.delete(listener);
+    },
+    onStatusChanged: (listener: (snapshot: { status: 'stopped' | 'connecting' | 'online' }) => void) => {
+      mocks.status.add(listener); return () => mocks.status.delete(listener);
+    },
     onPeerLinkReopened: (listener: (event: { deviceId: string }) => void) => {
       mocks.reopened.add(listener);
       return () => mocks.reopened.delete(listener);
@@ -130,6 +138,104 @@ const remaining = (card: ReturnType<typeof useDeviceProviderSubscriptionCard>) =
   card?.windows.map((window) => [window.key, window.window.utilization]);
 
 describe('useDeviceProviderSubscriptionCard', () => {
+  // Unit r4388718323: a native capability denial must retain its ordinary 15m
+  // backoff, but an actual reconnect probes once per shared device/account.
+  // Cover both a settled denial and a pre-reconnect request rejecting late.
+  it.each(['settled', 'pending', 'remount'] as const)('reprobes native quota on reconnect after a %s unsupported response', async (phase) => {
+    const native = (usedPercent: number) => ({ account: { planType: 'plus' }, rateLimits: { primary: { usedPercent, windowMinutes: 300 } } });
+    const oldMirror = { primary: { usedPercent: 50, windowMinutes: 300 } };
+    const unsupported = new Error('[CHANNEL_NOT_ALLOWED] old computer');
+    let rejectOld!: (error: Error) => void;
+    let reads = 0;
+    mocks.invoke.mockImplementation(async (_device, channel) => {
+      if (channel === 'maker:usage:account') return oldMirror;
+      reads++;
+      if (reads === 1) {
+        if (phase === 'pending') return new Promise((_resolve, reject) => { rejectOld = reject; });
+        throw unsupported;
+      }
+      if (reads === 2 && phase === 'settled') throw unsupported;
+      return native(91);
+    });
+    let first = renderHook(() => useDeviceProviderSubscriptionCard(codex, 'mini', { live: true }));
+    let second = renderHook(() => useDeviceProviderSubscriptionCard(codex, 'mini', { live: true }));
+    await act(async () => {});
+    expect(reads).toBe(1);
+    const reopen = async (deviceId: string) => {
+      const event = { deviceId };
+      await act(async () => mocks.reopened.forEach(listener => listener({ ...event })));
+    };
+    if (phase !== 'pending') {
+      await act(async () => { vi.advanceTimersByTime(30_000); });
+      expect(reads).toBe(1);
+    }
+    await reopen('other');
+    expect(reads).toBe(1);
+    if (phase === 'remount') {
+      first.unmount(); second.unmount();
+      await reopen('mini');
+      expect(reads).toBe(1); // Closed cards observe no events and send nothing.
+      first = renderHook(() => useDeviceProviderSubscriptionCard(codex, 'mini', { live: true }));
+      second = renderHook(() => useDeviceProviderSubscriptionCard(codex, 'mini', { live: true }));
+      await act(async () => {});
+    } else await reopen('mini');
+    if (phase === 'pending') await act(async () => rejectOld(unsupported));
+    expect(reads).toBe(2);
+    if (phase === 'settled') {
+      expect(remaining(first.result.current)).toEqual([['primary', 50]]);
+      await act(async () => { vi.advanceTimersByTime(30_000); });
+      expect(reads).toBe(2);
+      await reopen('mini');
+      expect(reads).toBe(3);
+    }
+    expect(remaining(first.result.current)).toEqual([['primary', 91]]);
+    expect(remaining(second.result.current)).toEqual([['primary', 91]]);
+    first.unmount(); second.unmount();
+    const previous = reads;
+    await reopen('mini');
+    expect(reads).toBe(previous);
+  });
+
+  // Unit r4388718335: an already-online card's first routine presence
+  // snapshot is not a reconnect. Existing recovery tests only emit peer reopen.
+  // A pending mount returning 91 must survive a would-be failing duplicate read.
+  it('keeps the pending first expansion read on routine initial online snapshots', async () => {
+    const native = (usedPercent: number) => ({ account: { planType: 'plus' }, rateLimits: { primary: { usedPercent, windowMinutes: 300 } } });
+    let finish!: (value: ReturnType<typeof native>) => void;
+    let reads = 0;
+    mocks.invoke.mockImplementation(async (_device, channel) => {
+      if (channel === 'maker:usage:account') return { primary: { usedPercent: 50, windowMinutes: 300 } };
+      reads++;
+      if (reads === 1) return new Promise(resolve => { finish = resolve; });
+      throw new Error('duplicate native read failed');
+    });
+    const hook = renderHook(() => useDeviceProviderSubscriptionCard(codex, 'mini', { live: true }));
+    const presence = (online: boolean): DeviceLinkPresenceSnapshot => ({
+      deviceId: 'mini', online, deviceName: 'Mini', platform: 'darwin', appVersion: 'test',
+      remoteControlEnabled: true, lastSeenAt: 1, busy: false,
+    });
+    await act(async () => {
+      mocks.presence.forEach(listener => listener(presence(true)));
+    });
+    await act(async () => finish(native(91)));
+    expect(reads).toBe(1);
+    expect(remaining(hook.result.current)).toEqual([['primary', 91]]);
+    await act(async () => mocks.presence.forEach(listener => listener(presence(true))));
+    expect(reads).toBe(1);
+    mocks.invoke.mockImplementation(async (_device, channel) => channel === 'maker:usage:account'
+      ? { primary: { usedPercent: 50, windowMinutes: 300 } } : (reads++, native(96)));
+    // A real relay transition still recovers; its following online presence
+    // belongs to the same recovery rather than another native read.
+    await act(async () => mocks.status.forEach(listener => listener({ status: 'connecting' })));
+    await act(async () => mocks.status.forEach(listener => listener({ status: 'online' })));
+    await act(async () => mocks.presence.forEach(listener => listener(presence(true))));
+    expect(reads).toBe(2);
+    expect(remaining(hook.result.current)).toEqual([['primary', 96]]);
+    await act(async () => mocks.presence.forEach(listener => listener(presence(false))));
+    await act(async () => mocks.presence.forEach(listener => listener(presence(true))));
+    expect(reads).toBe(3);
+  });
+
   // Unit regression r4388475446 / provider-groups.md §10: document-only
   // visibility cases missed native hide/minimize with throttling disabled.
   // Through the real live hook + host gate, both local/remote cards must avoid
