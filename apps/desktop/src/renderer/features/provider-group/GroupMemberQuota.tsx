@@ -107,10 +107,12 @@ export function GroupMemberQuota({
   // A stopped relay clears the shared directory to null. Keep the stop signal
   // across that update instead of falling back to a stale online group row.
   const relayStatus = relay && isDataOwnerGenerationCurrent(relay.owner) ? relay.status : null;
-  const quotaOffline = (remoteTarget && relayStatus === 'stopped') || (device
-    ? !(currentPresence?.online ?? device.online) ||
+  // A cached group row or presence push cannot supply the local control grant.
+  // Missing directory permissions must stop both provider and quota reads.
+  const quotaOffline = remoteTarget
+    ? relayStatus === 'stopped' || !device || !(currentPresence?.online ?? device.online) ||
       !(currentPresence?.remoteControlEnabled ?? device.remoteControlEnabled) || !device.controlEnabled
-    : offline);
+    : offline;
   // Unknown initial state cannot authorize a remote read from a cached group row.
   const remoteDeviceId = target.kind === 'device' && relayStatus !== null && !quotaOffline ? target.deviceId : null;
   const { providers: localProviders } = useProviders();

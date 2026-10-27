@@ -130,6 +130,45 @@ const remaining = (card: ReturnType<typeof useDeviceProviderSubscriptionCard>) =
   card?.windows.map((window) => [window.key, window.window.utilization]);
 
 describe('useDeviceProviderSubscriptionCard', () => {
+  // Unit regression r4388475446 / provider-groups.md §10: document-only
+  // visibility cases missed native hide/minimize with throttling disabled.
+  // Through the real live hook + host gate, both local/remote cards must avoid
+  // reads while initially hidden, pause polling, and reread once when restored.
+  it.each(['local', 'remote'] as const)('pauses the %s live quota card while the native window is hidden', async (location) => {
+    let nativeHidden!: (hidden: boolean) => void;
+    window.electronAPI.onWindowHiddenChange = callback => { nativeHidden = callback; return () => {}; };
+    const disposeGate = installHiddenAnimationGate();
+    try {
+      const native = (usedPercent: number) => ({ account: { planType: 'plus' }, rateLimits: { primary: { usedPercent, windowMinutes: 300 } } });
+      mocks.readLocal.mockResolvedValue(native(73));
+      mocks.invoke.mockImplementation(async (_device, channel) => channel === 'maker:usage:account' ? null : native(73));
+      await act(async () => { nativeHidden(true); });
+      const hook = renderHook(() => useDeviceProviderSubscriptionCard(codex, location === 'local' ? null : 'mini', { live: true }));
+      await act(async () => {});
+      expect(hook.result.current).toBeNull();
+      expect(mocks.readLocal).not.toHaveBeenCalled();
+      expect(mocks.invoke).not.toHaveBeenCalled();
+      await act(async () => { nativeHidden(false); });
+      expect(remaining(hook.result.current)).toEqual([['primary', 73]]);
+      const calls = () => location === 'local' ? mocks.readLocal.mock.calls.length : mocks.invoke.mock.calls.length;
+      const beforeHiding = calls();
+      await act(async () => { nativeHidden(true); });
+      expect(document.visibilityState).toBe('visible');
+      expect(hook.result.current).toBeNull();
+      await act(async () => { vi.advanceTimersByTime(45_000); });
+      expect(calls()).toBe(beforeHiding);
+      mocks.readLocal.mockResolvedValue(native(84));
+      mocks.invoke.mockImplementation(async (_device, channel) => channel === 'maker:usage:account' ? null : native(84));
+      await act(async () => { nativeHidden(false); });
+      expect(remaining(hook.result.current)).toEqual([['primary', 84]]);
+      expect(calls() - beforeHiding).toBe(location === 'local' ? 1 : 2);
+      hook.unmount();
+      const afterUnmounting = calls();
+      await act(async () => { nativeHidden(true); nativeHidden(false); vi.advanceTimersByTime(30_000); });
+      expect(calls()).toBe(afterUnmounting);
+    } finally { disposeGate(); }
+  });
+
   // Unit regression r4355497194 / remote-and-mobile-adaptation.md: six expanded
   // accounts produce twelve slow periodic reads. Existing polling coverage had
   // only one account. Run the real admission scheduler at the preload boundary:

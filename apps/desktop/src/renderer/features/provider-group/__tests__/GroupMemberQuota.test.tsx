@@ -80,7 +80,7 @@ beforeEach(() => {
       return () => mocks.status.delete(listener);
     },
   } });
-  mocks.devices = [];
+  mocks.devices = ['mini', 'pc'].map(deviceId => ({ deviceId, online: true, remoteControlEnabled: true, controlEnabled: true }));
   mocks.local = [claude('anthropic')];
   mocks.byDevice = { mini: [claude('anthropic-1a2b')], pc: [apiKey('openrouter')] };
   mocks.deviceReads.length = 0;
@@ -94,12 +94,54 @@ afterEach(() => {
 });
 
 describe('GroupMemberQuota', () => {
+  // Unit regression r4388475435 / provider-groups.md §10: the old tests
+  // supplied permissions only after recovery. A cached online group + online
+  // relay must not show quota or read a peer without a matching directory row,
+  // including after that row disappears; an online push cannot grant control.
+  it('requires directory permissions before reading and clears quota when the target row disappears', async () => {
+    mocks.devices = null;
+    const view = () => <GroupMemberQuota id="quota" target={{ kind: 'device', deviceId: 'mini', providerId: 'anthropic-1a2b' }} offline={false} />;
+    const mounted = await mountQuota(view());
+    const unread = () => {
+      expect(screen.queryByTestId('quota-card')).toBeNull();
+      expect(mocks.deviceReads.at(-1)).toBeUndefined();
+      expect(mocks.cardReads.at(-1)).toEqual([undefined, null]);
+    };
+    unread();
+    const online = { deviceId: 'mini', online: true, remoteControlEnabled: true, controlEnabled: true };
+    const emitOnline = () => act(() => mocks.presence.forEach(listener => listener({
+      deviceId: 'mini', online: true, remoteControlEnabled: true,
+      deviceName: 'Mini', platform: 'darwin', appVersion: 'test', lastSeenAt: 1, busy: false,
+    })));
+    for (const directory of [[], [{ ...online, deviceId: 'other' }]]) {
+      mocks.devices = directory;
+      mounted.rerender(view());
+      emitOnline();
+      unread();
+    }
+    mocks.devices = [online];
+    mounted.rerender(view());
+    expect(screen.getByTestId('quota-card').textContent).toBe('Mini’s Claude');
+    for (const directory of [null, []]) {
+      mocks.devices = directory;
+      mounted.rerender(view());
+      emitOnline();
+      unread();
+    }
+    mocks.devices = [{ ...online, controlEnabled: false }];
+    mounted.rerender(view());
+    emitOnline();
+    unread();
+    mocks.devices = [online];
+    mounted.rerender(view());
+    expect(screen.getByTestId('quota-card').textContent).toBe('Mini’s Claude');
+  });
+
   // Unit regression r4356429402: opening a stale-online row after the stopped
   // event must wait for the real initial state. Existing coverage only sent
   // future status events after mounting; initial failure must not permit reads.
   it.each(['stopped', 'unavailable'] as const)('waits for the initial relay state and keeps %s targets unread', async (state) => {
     vi.useFakeTimers();
-    mocks.devices = null;
     let resolve!: (state: { linkStatus: string }) => void;
     let reject!: (error: Error) => void;
     mocks.getState.mockReturnValue(new Promise((done, fail) => { resolve = done; reject = fail; }));
@@ -125,7 +167,6 @@ describe('GroupMemberQuota', () => {
     ['stopped', 'online', false],
     ['online', 'stopped', true],
   ] as const)('keeps the newer %s push when an older %s seed arrives', async (push, seed, readable) => {
-    mocks.devices = null;
     let resolve!: (state: { linkStatus: string }) => void;
     mocks.getState.mockReturnValue(new Promise(done => { resolve = done; }));
     await mountQuota(<GroupMemberQuota id="quota" target={{ kind: 'device', deviceId: 'mini', providerId: 'anthropic-1a2b' }} offline={false} />);
@@ -137,7 +178,6 @@ describe('GroupMemberQuota', () => {
   });
 
   it('discards an initial relay reply from the previous owner', async () => {
-    mocks.devices = null;
     const replies: Array<(state: { linkStatus: string }) => void> = [];
     mocks.getState.mockImplementation(() => new Promise(resolve => replies.push(resolve)));
     const view = () => <GroupMemberQuota id="quota" target={{ kind: 'device', deviceId: 'mini', providerId: 'anthropic-1a2b' }} offline={false} />;
@@ -237,6 +277,7 @@ describe('GroupMemberQuota', () => {
   // it is online, even while the group still has a cached offline status.
   it('recovers quota reads from live device presence without waiting for the cached group status', async () => {
     vi.useFakeTimers();
+    mocks.devices = [];
     const view = <GroupMemberQuota id="quota" target={{ kind: 'device', deviceId: 'mini', providerId: 'anthropic-1a2b' }} offline />;
     const mounted = await mountQuota(view);
     expect(screen.getByText('providerGroup.member.quota.offline')).toBeTruthy();
@@ -281,6 +322,7 @@ describe('GroupMemberQuota', () => {
   });
 
   it('does not read an offline computer', async () => {
+    mocks.devices = [{ deviceId: 'mini', online: false, remoteControlEnabled: true, controlEnabled: true }];
     await show({ kind: 'device', deviceId: 'mini', providerId: 'anthropic-1a2b' }, true);
     expect(screen.getByText('providerGroup.member.quota.offline')).toBeTruthy();
     expect(mocks.deviceReads.every((deviceId) => deviceId === undefined)).toBe(true);

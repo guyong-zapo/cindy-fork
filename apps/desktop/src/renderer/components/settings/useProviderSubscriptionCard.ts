@@ -19,6 +19,7 @@ import {
   requestRemoteClaudeSubscriptionRefresh,
 } from '@/hooks/useRemoteClaudeSubscriptionUsage';
 import { useDocumentVisible } from '@/hooks/useWindowVisible';
+import { HIDDEN_ANIMATION_ATTR } from '@/lib/hiddenAnimationGate';
 import { useDeviceLinkReconnectEpoch } from '@/features/device-link/useDeviceLinkReconnectEpoch';
 import {
   selectRemoteCodexAccountUsage,
@@ -165,7 +166,20 @@ export function useDeviceProviderSubscriptionCard(
   options: { live?: boolean } = {},
 ): UsageCardAccount | null {
   const visible = useDocumentVisible(options.live === true);
-  const active = !options.live || visible;
+  const [nativeVisible, setNativeVisible] = useState(
+    () => typeof document === 'undefined' || !document.documentElement.hasAttribute(HIDDEN_ANIMATION_ATTR),
+  );
+  useEffect(() => {
+    if (!options.live) return;
+    // Electron may keep visibilityState visible while an active turn disables
+    // throttling. Observe the existing host hide/minimize gate as well.
+    const update = () => setNativeVisible(!document.documentElement.hasAttribute(HIDDEN_ANIMATION_ATTR));
+    update();
+    const observer = new MutationObserver(update);
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: [HIDDEN_ANIMATION_ATTR] });
+    return () => observer.disconnect();
+  }, [options.live]);
+  const active = !options.live || (visible && nativeVisible);
   const activeProvider = active ? provider : undefined;
   const source = activeProvider
     ? providerWeeklyQuotaSource({ ...activeProvider, suspended: false })
