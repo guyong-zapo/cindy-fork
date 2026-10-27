@@ -299,6 +299,60 @@ describe('GroupMemberQuota', () => {
     readable();
   });
 
+  // Unit r4391647927 / §10: earlier cases kept offline=true throughout.
+  // A later group poll can report a new offline transition after directory
+  // confirmation (and even online presence), while listDevices retains old rows.
+  it.each([
+    { status: 'loading', recovery: 'directory' },
+    { status: 'error', recovery: 'presence' },
+  ] as const)('invalidates older peer evidence on a new offline group state during $status', async ({ status, recovery }) => {
+    let offline = false;
+    const view = () => <GroupMemberQuota id="quota" target={{ kind: 'device', deviceId: 'mini', providerId: 'anthropic-1a2b' }} offline={offline} />;
+    const mounted = await mountQuota(view());
+    const readable = () => expect(screen.getByTestId('quota-card').textContent).toBe('Mini’s Claude');
+    const unread = () => {
+      expect(screen.getByText('providerGroup.member.quota.offline')).toBeTruthy();
+      expect(screen.queryByTestId('quota-card')).toBeNull();
+      expect(mocks.deviceReads.at(-1)).toBeUndefined();
+      expect(mocks.cardReads.at(-1)).toEqual([undefined, null]);
+    };
+    const emit = (deviceId: string) => act(() => mocks.presence.forEach(listener => listener({
+      deviceId, online: true, remoteControlEnabled: true,
+      deviceName: 'Mini', platform: 'darwin', appVersion: 'test', lastSeenAt: 1, busy: false,
+    })));
+    readable();
+    if (recovery === 'presence') emit('mini');
+    mocks.directoryStatus = status;
+    mounted.rerender(view());
+    readable(); // A directory refresh alone does not invalidate confirmed state.
+    mocks.deviceReads.length = 0;
+    mocks.cardReads.length = 0;
+    offline = true;
+    mounted.rerender(view());
+    unread();
+    expect(mocks.deviceReads.every(id => id === undefined)).toBe(true);
+    expect(mocks.cardReads.every(([provider, id]) => provider === undefined && id === null)).toBe(true);
+    emit('other');
+    mocks.devices = [...mocks.devices!];
+    mounted.rerender(view());
+    unread();
+    if (recovery === 'presence') emit('mini');
+    else {
+      mocks.directoryStatus = 'ready';
+      mocks.devices = [...mocks.devices!];
+      mounted.rerender(view());
+    }
+    readable();
+    // Another online→offline transition must also discard the recovered evidence.
+    offline = false;
+    mocks.directoryStatus = 'error';
+    mounted.rerender(view());
+    readable();
+    offline = true;
+    mounted.rerender(view());
+    unread();
+  });
+
   // Unit r4389193553 / §10: the old offline-directory test missed a stale
   // online array retained after a missed pre-mount offline event + failed read.
   // Error/loading cannot override the group's offline row without fresh target

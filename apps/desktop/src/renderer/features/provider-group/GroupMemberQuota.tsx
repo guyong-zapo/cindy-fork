@@ -53,6 +53,9 @@ export function GroupMemberQuota({
   const remoteTarget = target.kind === 'device';
   const owner = getDataOwnerGeneration();
   const confirmedDirectory = useRef<{ owner: typeof owner; deviceId: string } | null>(null);
+  const previousGroupStatus = useRef({ owner, deviceId: targetDeviceId, offline });
+  const groupWentOffline = previousGroupStatus.current.owner === owner &&
+    previousGroupStatus.current.deviceId === targetDeviceId && !previousGroupStatus.current.offline && offline;
   const [relay, setRelay] = useState<{
     owner: typeof owner;
     status: QuotaRelayStatus;
@@ -79,6 +82,15 @@ export function GroupMemberQuota({
     online: boolean;
     remoteControlEnabled: boolean;
   } | null>(null);
+  useLayoutEffect(() => {
+    // A newly offline group poll is newer than previously confirmed directory
+    // or presence evidence. Initial cached offline state still permits recovery.
+    if (groupWentOffline) {
+      confirmedDirectory.current = null;
+      setPresence(null);
+    }
+    previousGroupStatus.current = { owner, deviceId: targetDeviceId, offline };
+  }, [owner, targetDeviceId, offline, groupWentOffline]);
   useEffect(() => {
     const deviceLink = window.electronAPI?.deviceLink;
     if (!deviceLink) return;
@@ -145,7 +157,7 @@ export function GroupMemberQuota({
   // remains fresher until the directory changes; local control permission comes
   // from the local preference snapshot, falling back to directory data only when
   // that snapshot is unavailable, never from a remote online announcement.
-  const currentPresence = presence?.deviceId === targetDeviceId && presence.directory === devices &&
+  const currentPresence = !groupWentOffline && presence?.deviceId === targetDeviceId && presence.directory === devices &&
     isDataOwnerGenerationCurrent(presence.owner) ? presence : null;
   const device = target.kind === 'device' ? devices?.find((entry) => entry.deviceId === target.deviceId) : undefined;
   // A stopped relay clears the shared directory to null. Keep the stop signal
@@ -158,7 +170,7 @@ export function GroupMemberQuota({
   // Keep this target's successful directory evidence through unrelated refresh
   // loading/errors. It belongs to this owner/target/relay generation, and explicit
   // target offline/remote-control evidence invalidates it immediately.
-  const directoryConfirmed = confirmedDirectory.current?.owner === owner &&
+  const directoryConfirmed = !groupWentOffline && confirmedDirectory.current?.owner === owner &&
     confirmedDirectory.current.deviceId === targetDeviceId;
   useLayoutEffect(() => {
     if (relayStatus !== 'online' || !targetDeviceId || !device || !device.online || !device.remoteControlEnabled ||
