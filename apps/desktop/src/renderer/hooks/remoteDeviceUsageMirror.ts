@@ -16,7 +16,7 @@ function isSnapshotShape(value: unknown): value is Record<string, unknown> {
 }
 
 export interface RemoteDeviceUsageMirror<T> {
-  useMirror(deviceId: string | null, providerId?: string, options?: { live?: boolean }): T | null;
+  useMirror(deviceId: string | null, providerId?: string, options?: { live?: boolean; refreshEpoch?: number }): T | null;
   request(deviceId: string, providerId?: string, queueIfPending?: boolean, scheduling?: { background?: boolean }): void;
   resetForTest(): void;
 }
@@ -165,9 +165,10 @@ export function createRemoteDeviceUsageMirror<T extends object>(cfg: {
         }
       });
   }
-  function useMirror(deviceId: string | null, providerId?: string, options: { live?: boolean } = {}): T | null {
+  function useMirror(deviceId: string | null, providerId?: string, options: { live?: boolean; refreshEpoch?: number } = {}): T | null {
     const entry = deviceId ? entryFor(deviceId, providerId) : null;
     const live = options.live === true;
+    const refreshEpoch = live ? options.refreshEpoch : undefined;
     const lastLiveEntry = useRef<Entry | null>(null);
     const [, rerender] = useState(0);
     useEffect(() => {
@@ -182,7 +183,9 @@ export function createRemoteDeviceUsageMirror<T extends object>(cfg: {
         entry.settledAt > 0 &&
         Date.now() - entry.settledAt < MOUNT_REUSE_MS;
       // A pending request from before an observation gap cannot stand in for
-      // the fresh read required on resume. Concurrent live consumers still share it.
+      // the fresh read required on resume/reconnect. A changed live refreshEpoch
+      // reopens this observation so its queued work remains owned by this effect.
+      // Concurrent first-time live consumers still share the pending read.
       const firstObserver = entry.listeners.size === 0;
       const resumePending = !live && firstObserver && entry.pending;
       const resumed = live && (lastLiveEntry.current === entry ||
@@ -289,7 +292,7 @@ export function createRemoteDeviceUsageMirror<T extends object>(cfg: {
         if (entry.listeners.size === 0) { entry.stopReconnect?.(); entry.stopReconnect = undefined; }
         off();
       };
-    }, [deviceId, providerId, entry, live]);
+    }, [deviceId, providerId, entry, live, refreshEpoch]);
     // Read the current entry during render: switching devices/accounts must not show the old value.
     return entry?.snapshot ?? null;
   }

@@ -216,6 +216,61 @@ describe('useDeviceProviderSubscriptionCard', () => {
     }
   });
 
+  // Unit r4390277632 / provider-groups §10: reconnect queued a global read
+  // that survived closing the card while an ordinary subscriber remained.
+  // Drive the real live card/mirror through peer-reopened with an old RPC pending;
+  // the open card refreshes immediately, but collapse/hide cancel only its work.
+  it.each(['claude', 'xai', 'codex'] as const)('owns and cancels the shared %s reconnect reread', async source => {
+    mocks.realRemoteSubscription = true;
+    const id = source === 'claude' ? 'anthropic' : source === 'xai' ? 'xai' : 'openai';
+    const account = provider(id, { method: 'oauth', native: source });
+    const channel = source === 'claude' ? 'maker:usage:claude-subscription' : source === 'xai' ? 'maker:usage:xai-subscription' : 'maker:usage:account';
+    const value = source === 'claude' ? snapshot(82) : source === 'xai' ? {
+      creditUsagePercent: 82, planLabel: 'SuperGrok', updatedAt: Date.now(), resetsAt: Date.now() / 1000 + 3600,
+    } : { primary: { usedPercent: 82, windowMinutes: 300 } };
+    for (const mode of ['open', 'collapsed', 'hidden', 'another-live-card'] as const) {
+      setDataOwnerGeneration(`reconnected-${source}-${mode}`);
+      vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+      let reject!: (error: Error) => void;
+      let reads = 0;
+      mocks.invoke.mockImplementation((_device, requested) => {
+        if (requested !== channel) return Promise.reject(new Error('[CHANNEL_NOT_ALLOWED] legacy host'));
+        if (reads++ === 0) return new Promise((_resolve, fail) => { reject = fail; });
+        return Promise.resolve(value);
+      });
+      const other = renderHook(() => ({
+        claude: useRemoteClaudeSubscriptionUsage(source === 'claude' ? 'mini' : null, id),
+        xai: useRemoteXaiSubscriptionUsage(source === 'xai' ? 'mini' : null, id),
+        codex: useRemoteCodexAccountUsage(source === 'codex' ? 'mini' : null, id),
+      }));
+      const renderCard = () => renderHook(() => useDeviceProviderSubscriptionCard(account, 'mini', { live: true }));
+      const card = renderCard();
+      const second = mode === 'another-live-card' ? renderCard() : null;
+      await act(async () => {});
+      expect(reads).toBe(1);
+      act(() => { for (const listener of mocks.reopened) listener({ deviceId: 'unrelated' }); });
+      expect(reads).toBe(1);
+      act(() => { for (const listener of mocks.reopened) listener({ deviceId: 'mini' }); });
+      expect(reads).toBe(1);
+      if (mode === 'collapsed' || second) card.unmount();
+      if (mode === 'hidden') {
+        vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+        act(() => document.dispatchEvent(new Event('visibilitychange')));
+        expect(card.result.current).toBeNull();
+      }
+      await act(async () => reject(new Error('old request failed')));
+      const stillOpen = mode === 'open' || second !== null;
+      expect(reads).toBe(stillOpen ? 2 : 1);
+      if (stillOpen) {
+        expect((second ?? card).result.current?.windows[0]?.window.utilization).toBe(82);
+        expect(other.result.current[source]).toEqual(value);
+      } else expect(other.result.current[source]).toBeNull();
+      if (mode !== 'collapsed' && !second) card.unmount();
+      second?.unmount();
+      other.unmount();
+    }
+  });
+
   // Unit r4389409976 / §10: prior local pending/resume coverage used Codex;
   // Claude/xAI were mocked. Exercise the real subscription cache through the
   // live card: keep the first success across hide/resume and a failed reread.

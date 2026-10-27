@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import type { ProviderView } from '@cindy/model-providers';
@@ -129,16 +129,18 @@ function useRemoteProviderSubscriptionCard(
   provider: ProviderView | undefined,
   deviceId: string | null,
   groupLive: boolean,
+  refreshEpoch: number,
 ): UsageCardAccount | null {
   const { t, i18n } = useTranslation();
   const source = provider && deviceId ? providerWeeklyQuotaSource({ ...provider, suspended: false }) : null;
   const providerId = provider?.id ?? 'openai';
+  const liveObservation = groupLive ? { live: true, refreshEpoch } : { live: false };
   // Ordinary cards keep the upstream shared minute reader; expanded group cards
   // retain their native result + legacy mirror and explicit recovery/15s refresh.
-  const codex = useRemoteCodexAccountUsage(source === 'codex' ? deviceId : null, providerId, { live: !groupLive, groupLive });
+  const codex = useRemoteCodexAccountUsage(source === 'codex' ? deviceId : null, providerId, { live: !groupLive, groupLive, refreshEpoch });
   const limits = useRemoteCodexRateLimits(groupLive && source === 'codex' ? deviceId : null, providerId);
-  const claude = useRemoteClaudeSubscriptionUsage(source === 'claude' ? deviceId : null, providerId, { live: groupLive });
-  const xai = useRemoteXaiSubscriptionUsage(source === 'xai' ? deviceId : null, providerId, { live: groupLive });
+  const claude = useRemoteClaudeSubscriptionUsage(source === 'claude' ? deviceId : null, providerId, liveObservation);
+  const xai = useRemoteXaiSubscriptionUsage(source === 'xai' ? deviceId : null, providerId, liveObservation);
   const [nowMs, setNowMs] = useState(Date.now);
   useEffect(() => {
     if (!source) return;
@@ -189,7 +191,6 @@ export function useDeviceProviderSubscriptionCard(
     options.live && source ? deviceId ?? undefined : undefined,
     options.live ? true : undefined,
   );
-  const previousEpoch = useRef(epoch);
   const local = useProviderSubscriptionCard(deviceId === null ? activeProvider : undefined, {
     live: options.live === true,
   });
@@ -197,25 +198,18 @@ export function useDeviceProviderSubscriptionCard(
     deviceId === null ? undefined : activeProvider,
     deviceId,
     options.live === true,
+    epoch,
   );
   useEffect(() => {
     if (!options.live || !source || !providerId) return;
     const timer = window.setInterval(
-      () => refreshSubscriptionCard(source, providerId, deviceId, false, { background: true }),
+      () => refreshSubscriptionCard(source, providerId, deviceId, { background: true }),
       15_000,
     );
     return () => window.clearInterval(timer);
   }, [options.live, source, providerId, deviceId]);
-  useEffect(() => {
-    const reconnected = previousEpoch.current !== epoch;
-    previousEpoch.current = epoch;
-    // Mirrors own mount/resume reads, including queuing behind an old pending
-    // read. Only a reconnect observed while mounted needs another refresh here.
-    if (reconnected && options.live && source && providerId && deviceId) {
-      // The shared native mirror owns its one-per-entry reconnect probe.
-      refreshSubscriptionCard(source, providerId, deviceId, true, undefined, false);
-    }
-  }, [options.live, source, providerId, deviceId, epoch]);
+  // Live mirrors observe epoch changes with the same cancellable lifecycle as
+  // mount/resume. Native Codex retains its shared one-per-entry recovery probe.
   return deviceId === null ? local : remote;
 }
 
@@ -223,17 +217,15 @@ function refreshSubscriptionCard(
   source: NonNullable<ReturnType<typeof providerWeeklyQuotaSource>>,
   providerId: string,
   deviceId: string | null,
-  queueIfPending = false,
   scheduling?: { background?: boolean },
-  refreshNative = true,
 ): void {
   if (deviceId) {
     if (source === 'codex') {
-      if (refreshNative) requestRemoteCodexRateLimitsRefresh(deviceId, providerId, queueIfPending, scheduling);
-      requestRemoteCodexAccountRefresh(deviceId, providerId, queueIfPending, scheduling);
+      requestRemoteCodexRateLimitsRefresh(deviceId, providerId, false, scheduling);
+      requestRemoteCodexAccountRefresh(deviceId, providerId, false, scheduling);
     } else if (source === 'claude') {
-      requestRemoteClaudeSubscriptionRefresh(deviceId, providerId, queueIfPending, scheduling);
-    } else requestRemoteXaiSubscriptionRefresh(deviceId, providerId, queueIfPending, scheduling);
+      requestRemoteClaudeSubscriptionRefresh(deviceId, providerId, false, scheduling);
+    } else requestRemoteXaiSubscriptionRefresh(deviceId, providerId, false, scheduling);
   } else if (source === 'codex') {
     requestCodexRateLimitsRefresh(providerId);
     requestCodexAccountRefresh(providerId);
