@@ -1980,6 +1980,19 @@ const config: ForgeConfig = {
       buildWindowsGamepadHelper(platform, arch);
       buildWindowsAtomicRenameHelper(platform, arch);
       buildWindowsTaskbarAddon(platform, arch);
+      if (platform === 'darwin') {
+        const trackpadBuild = spawnSync(
+          process.execPath,
+          [
+            path.join(__dirname, 'native/trackpad/build.mjs'),
+            path.join(__dirname, 'resources/tools/trackpad/cindy-trackpad.node'),
+            arch,
+          ],
+          { stdio: 'inherit' },
+        );
+        if (trackpadBuild.error || trackpadBuild.status !== 0)
+          throw new Error('Native trackpad build failed');
+      }
       buildMacVoiceInputModifierShortcutListener(platform, arch);
       buildMacAgentIslandHelper(platform, arch);
       buildMacComputerPermissionGuideHelper(platform, arch);

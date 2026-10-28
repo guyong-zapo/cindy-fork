@@ -4,11 +4,37 @@ import {
   AUTO_REVIEW_DELEGATED_CONTINUATION,
   restoreAutoReviewUserIntent,
   restoreAutoReviewSteerIntent,
+  readAutoReviewUserText,
   currentAutoReviewResourceIntent,
   type AutoReviewHistoryMessage,
 } from '../autoReviewUserIntent';
 import { projectPersistedAgentFacingUserText } from '@cindy/maker-shared/agent-input-projection';
 import { formatQuoteForSend, formatQuotesForSend } from '@cindy/maker-shared/chat-quotes';
+
+describe('pasted authored text', () => {
+  // #7424 / unit: production readText/resource projection must preserve exact owner authorization.
+  // Existing negatives cover structured resources, not paste-only or mixed input; the minimal old
+  // failure is any non-empty pastedTextRanges returning null/''. Long paste and restrictions are observable auth evidence.
+  const longPaste = Array.from({ length: 24 }, (_, index) => `第 ${index + 1} 行：允许本地修改和测试。`).join('\n');
+  it.each([
+    { name: 'full paste', prefix: '', pasted: `${longPaste}\n不要 push、不要发布。`, suffix: '' },
+    { name: 'mixed input', prefix: '先检查现状。\n', pasted: longPaste,
+      suffix: '\n允许本地修改和测试，但不要 push、不要发布。' },
+  ])('preserves the complete authorization for $name', ({ prefix, pasted, suffix }) => {
+    const text = `${prefix}${pasted}${suffix}`;
+    const content = { text, pastedTextRanges: [{ start: prefix.length, end: prefix.length + pasted.length }] };
+    expect(readAutoReviewUserText(content)).toBe(text);
+    expect(currentAutoReviewResourceIntent(content, text)).toBe(text);
+    expect(currentAutoReviewResourceIntent(content, projectPersistedAgentFacingUserText(content)!)).toBe(text);
+  });
+
+  it('restores a persisted pasted message once on retry', () => {
+    const text = '允许本地修改和测试，但不要 push、不要发布。';
+    const content = { text, pastedTextRanges: [{ start: 0, end: text.length }] };
+    const message = { ...user(text, 'pasted'), content };
+    expect(restoreAutoReviewUserIntent([message], { clientId: 'pasted', content })).toBe(text);
+  });
+});
 
 describe('authored text beside structured references', () => {
   // unit: Composer list markers are structure, not an owner's new request.
@@ -35,7 +61,7 @@ describe('authored text beside structured references', () => {
     expect(currentAutoReviewResourceIntent(content, text).trim()).toBe(request);
     expect(currentAutoReviewResourceIntent(content, wire).trim()).toBe(request);
     expect(currentAutoReviewResourceIntent(content, `${wire} changed`)).toBe('');
-    expect(currentAutoReviewResourceIntent({ ...content, pastedTextRanges: [{}] }, wire)).toBe('');
+    expect(currentAutoReviewResourceIntent({ ...content, pastedTextRanges: [{}] }, wire).trim()).toBe(request);
     const invalid = { ...content, agentReferences: [{ ...content.agentReferences[0], end: href.length + 1 }] };
     expect(currentAutoReviewResourceIntent(invalid, projectPersistedAgentFacingUserText(invalid)!)).toBe('');
   });
@@ -271,7 +297,6 @@ describe('restored Auto authorization', () => {
   it.each([
     { quotesEncoded: true },
     { sessionReferences: [{}] },
-    { pastedTextRanges: [{}] },
     { images: [{}] },
     { files: [{}] },
   ])(

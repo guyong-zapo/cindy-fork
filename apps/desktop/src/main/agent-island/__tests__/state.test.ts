@@ -508,7 +508,7 @@ describe('Agent Island display state', () => {
     expect(display.sessions[0]).toMatchObject({
       sessionId: 's1',
       projectName: 'xdt-maker',
-      detail: 'imagegen',
+      detail: '正在调用工具…',
       activityLines: [
         { id: '1', kind: 'user', text: '正在执行绘画命令 请生成一张图' },
         { id: '2', kind: 'assistant', text: '我会开始生成图片。' },
@@ -713,6 +713,24 @@ describe('Agent Island display state', () => {
       detail: '运行测试',
       phase: 'running',
     });
+  });
+
+  // #7474, unit: the public event -> display/activity snapshot path must not
+  // fall back to an internal tool name when a real event has no input payload.
+  it('publishes readable tool activity even when input is absent', () => {
+    const state = createAgentIslandState();
+    setAgentIslandToolWording(state, {
+      ...DEFAULT_TOOL_ROW_WORDING,
+      toolCallLabel: () => 'Calling a tool…',
+    });
+    applyAgentIslandEvent(state, { sessionId: 's1', title: 'Task', agentKind: 'codex' }, {
+      type: 'tool_use',
+      source: 'codex',
+      data: { toolUseId: 'tool-1', toolName: 'mcp:server:read_by_url' },
+    }, 1_000);
+
+    expect(buildAgentIslandDisplayState(state, 1_050).sessions[0]?.detail).toBe('Calling a tool…');
+    expect(buildAllSessionActivitySnapshots(state)[0]?.detail).toBe('Calling a tool…');
   });
 
   it('keeps the raw shell command when no intent rule classifies it', () => {

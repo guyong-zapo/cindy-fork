@@ -255,7 +255,7 @@ export function createAutoReviewIntentProjection() {
       : null;
   }
 
-  function readAutoReviewUserText(content: unknown): string | null {
+  function readAutoReviewUserText(content: unknown, wireText?: string): string | null {
     if (typeof content === "string") {
       try {
         content = JSON.parse(content);
@@ -276,10 +276,10 @@ export function createAutoReviewIntentProjection() {
         "sessionReferences",
         "agentReferences",
         "references",
-        "pastedTextRanges",
       ].some((key) => Array.isArray(value[key]) && value[key].length > 0)
     )
       return null;
+    if (wireText !== undefined && value.text !== wireText) return null;
     return value.text;
   }
 

@@ -68,7 +68,7 @@ import { setBotRemoteMessageService } from './botRemoteMessageReceiver.js';
 import { handleListDevices, defaultDeps as deviceDirectoryDeps } from '../device-link/ipc.js';
 import { configureBotAutonomyHost, getBotAutonomyGlance, noteBotAutonomyInputProjection } from '../bot-autonomy/hub.js';
 import { getHostSourceDevice, getSelfDeviceId, remoteBackgroundInvoke, remoteInvoke as invokeBotPeer } from '../device-link/index.js';
-import { readDeviceProviderViews } from '../remote-agent/controller/deviceCatalog.js';
+import { readDeviceProviderViews, readRemoteProviderRoute } from '../remote-agent/controller/deviceCatalog.js';
 import { checkDeviceRoute } from '../remote-agent/controller/deviceRouteCheck.js';
 import { cancelPendingRemoteStart } from '../remote-agent/controller/startRemote.js';
 import { forgetCredentialGrants } from '../remote-agent/executor/credentialGrants.js';
@@ -1496,7 +1496,6 @@ import {
   broadcastGhostMessageBlocked,
   broadcastGhostMessageRewritten,
   createGhostSessionTap,
-  bindGhostHarnessSession,
   getGhostFsSlot,
   hasEnabledUserMessageHookGhost,
   screenGhostUserMessage,
@@ -4858,6 +4857,11 @@ export function getTaskActionInputState(sessionId: string) {
   };
 }
 
+/** Runtime-only account boundary for personal author tools; never grants external-write permission. */
+export function isActiveInputAccountScoped(sessionId: string): boolean {
+  return agentInputCoordinatorHolder?.isActiveInputAccountScoped(sessionId) ?? false;
+}
+
 /** Live permission authority for Host task actions; never reconstructed from DB defaults. */
 export function getTaskActionSession(sessionId: string) {
   return getMakerIfReady()?.getSession(sessionId);
@@ -6284,8 +6288,6 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
   // 订阅槽①旁听 tap(独立监听,叠加在主转发之外互不干扰):AgentEvent →
   // did-turn-*。资格(用户主会话)与自动化轮次过滤都在 tap 内部,这里零逻辑。
   const ghostSessionTap = createGhostSessionTap(session.id);
-  registration.disposers.push(bindGhostHarnessSession(session,
-    () => sessionBindings.getSession(session.id) === session));
   // 拆线收口:实例替换(上面的 existing.disposers)与会话关闭(下面 closed 的
   // finally)两条路径都要给插件补上缺失的 did-turn-end 与在场审批的 end,否则订阅方
   // 的「AI 在忙 / 在等审批」外层状态永久卡住。observer 也在这里摘掉。
@@ -6758,11 +6760,13 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   const projectScheduledPreferences = (sessionId: string, saved: ScheduledModelSelection) => {
     const baseline: ScheduledModelSelection = {
       agentKind: saved.agentKind, model: saved.model, providerId: saved.providerId,
+      ...(saved.agentDeviceId !== undefined ? { agentDeviceId: saved.agentDeviceId } : {}),
       effort: saved.effort, fastMode: saved.fastMode,
     };
     return {
       ...projectSessionRuntimeControl(sessionId, baseline),
       agentKind: makerToDbAgentKind(baseline.agentKind),
+      ...(baseline.agentDeviceId !== undefined ? { agentDeviceId: baseline.agentDeviceId } : {}),
       model: baseline.model,
       providerId: baseline.providerId,
       effort: baseline.effort ?? '',
@@ -7287,6 +7291,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       supportsSchedulePreRunHook: true,
       // Full scheduled model selection, including bound Harness changes and template overrides.
       supportsScheduleModelSelection: true,
+      supportsScheduleAgentDeviceSelection: true,
     };
   });
 
@@ -11428,6 +11433,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         ...agentSwitchDeps, pendingSwitches: undefined, onPendingSwitchChanged: undefined,
       }, {
         sessionId, targetAgentKind: route.agentKind, model: route.model,
+        agentDeviceId: route.agentDeviceId,
         providerId: route.providerId, effort: route.effort, fastMode: route.fastMode,
         applyNow: true, configStaged: true, signal,
       });
@@ -11467,6 +11473,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       const [row] = await getDbClient().drizzle.select({
         agentKind: sessions.agentKind, model: sessions.model, providerId: sessions.providerId,
         effort: sessions.effort, fastMode: sessions.fastMode, baseline: sessions.scheduledModelBaseline,
+        agentDeviceId: sessions.agentDeviceId,
         status: sessions.status, botId: botProfiles.id, profileVersion: botProfiles.currentVersion,
       }).from(sessions)
         .leftJoin(botSessionLinks, and(eq(botSessionLinks.sessionId, sessions.id),
@@ -11476,6 +11483,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       return row?.status === 'active' ? { baseline: row.baseline,
         profileRevision: row.botId ? JSON.stringify([row.botId, row.profileVersion]) : null, profile: {
         agentKind: dbToMakerAgentKind(row.agentKind), model: row.model, providerId: row.providerId,
+        agentDeviceId: row.agentDeviceId,
         effort: row.effort, fastMode: row.fastMode,
       } } : null;
     },
@@ -11539,9 +11547,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       .from(sessions).where(eq(sessions.id, sessionId)).limit(1);
     const baseline = parseScheduledModelBaseline(row?.baseline);
     if (!baseline) return false;
-    const providers = await getDesktopProviderService().listProviders({
-      allowSideEffects: false, catalog: getActiveCatalog(),
-    });
+    const providers = baseline.agentDeviceId
+      ? await readUsableAgentDeviceProviders(baseline.agentDeviceId, baseline.agentKind, baseline.model, baseline.providerId)
+      : await getDesktopProviderService().listProviders({
+        allowSideEffects: false, catalog: getActiveCatalog(),
+      });
     const providerId = baseline.providerId ??
       effectiveSourceIdForModel(providers, null, baseline.model, baseline.agentKind);
     const model = findCatalogModel(providers.find(p => p.id === providerId),
@@ -18023,6 +18033,17 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     },
     readAutoReviewHistory,
     readScheduledPermissions: getSessionFsSnapshot,
+    assertScheduledDispatchRoute: async (sessionId) => {
+      const session = maker.getSession(sessionId);
+      if (!session) throw new Error('Scheduled session unavailable before dispatch');
+      if (!session.agentDeviceId) return;
+      await readRemoteProviderRoute({
+        agentDeviceId: session.agentDeviceId,
+        agentKind: session.agentKind,
+        model: session.model,
+        providerId: getSessionProvider(sessionId),
+      });
+    },
     getSession: (sessionId) => maker.getSession(sessionId),
     closeSession: (sessionId) => maker.closeSession(sessionId),
     getSessionMeta: (sessionId) => maker.getSessionMeta(sessionId),

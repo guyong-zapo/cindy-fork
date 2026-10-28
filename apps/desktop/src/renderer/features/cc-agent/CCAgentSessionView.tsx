@@ -218,6 +218,7 @@ import { useSessionTurnActiveTruth } from '@/features/cc-agent/hooks/useSessionT
 import { useHistoryRecoveryNavigation } from '@/features/cc-agent/hooks/useHistoryRecoveryNavigation';
 import { useRemoteSessionLoading } from '@/features/cc-agent/hooks/useRemoteSessionLoading';
 import { RemoteSessionBanner } from './RemoteSessionBanner';
+import { WorkingDirectoryTip } from './WorkingDirectoryTip';
 import { decideRemoteSessionExit } from './remoteSessionExit';
 import { RemoteSessionLoading } from './RemoteSessionLoading';
 import {
@@ -6292,24 +6293,11 @@ function CCAgentSessionContent({
                       </div>
                     </Tip>
                   ) : (
-                    <Tip
-                      text={
-                        composerDir ? (
-                          session?.remoteHostId ? (
-                            // 远端 session: Tip 顶部加一行 "Host: <alias>" 让用户在
-                            // 同 workingDir 跨多 host 撞合场景下也能区分。hostId 即
-                            // SSH alias (HostConfig.id), 不需要额外 lookup。
-                            <>
-                              <div>Host: {session.remoteHostId}</div>
-                              <div>{composerDir}</div>
-                            </>
-                          ) : (
-                            composerDir
-                          )
-                        ) : null
-                      }
-                      mono
-                      side="top"
+                    <WorkingDirectoryTip
+                      path={composerDir}
+                      deviceId={remoteDeviceId ?? session?.deviceLinkDeviceId}
+                      deviceName={session?.deviceLinkDeviceName}
+                      remoteHostId={session?.remoteHostId}
                     >
                       {isRemoteWorktreeSession ? (
                         <div className="flex min-w-0 items-center gap-1.5">
@@ -6325,7 +6313,7 @@ function CCAgentSessionContent({
                           {workingDirChipContent}
                         </button>
                       )}
-                    </Tip>
+                    </WorkingDirectoryTip>
                   )}
 
                   {/* Right: Context capacity indicator */}
