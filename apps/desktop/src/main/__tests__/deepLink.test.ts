@@ -20,6 +20,11 @@ vi.mock('electron', () => ({
 // logger 依赖 electron-log + app path, 在测试里要么 mock 要么吞日志。给个 noop logger。
 const logs = vi.hoisted(() => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }));
 vi.mock('../logger', () => ({ createLogger: () => logs }));
+const owner = vi.hoisted(() => ({ generation: 1 }));
+vi.mock('../device-link/broadcast-tap', () => ({
+  captureDataOwnerBroadcastScope: () => ({ ownerScopeKey: String(owner.generation) }),
+  isDataOwnerBroadcastScopeCurrent: (scope: { ownerScopeKey?: string }) => scope.ownerScopeKey === String(owner.generation),
+}));
 
 import { vi } from 'vitest';
 import {
@@ -39,6 +44,7 @@ import {
   focusMainWindow,
   handleIncomingDeepLink,
   openMainWindowVoiceSettings,
+  openMainWindowSession,
   openMainWindowRemoteControlSettings,
   setDeepLinkMainWindow,
   takePendingDeepLink,
@@ -423,6 +429,25 @@ describe('dual scheme (cindy primary + legacy xdt-maker)', () => {
     },
   );
 
+  it('retains the original task host and reply anchor while the main renderer is unavailable', () => {
+    setDeepLinkMainWindow(null);
+    openMainWindowSession('original', { deviceId: 'studio', messageClientId: 'reply', islandEntryId: 'entry' });
+    expect(takePendingDeepLink()).toEqual({ type: 'session', id: 'original', deviceId: 'studio', messageClientId: 'reply', islandEntryId: 'entry' });
+    expect(takePendingDeepLink()).toBeNull();
+  });
+
+  // Notification clicks can be buffered during reload, then pulled after another
+  // account logs in. The public main-window entry must reject that stale intent.
+  it('drops an old owner notification from the pending queue without dropping later external links', () => {
+    setDeepLinkMainWindow(null);
+    openMainWindowSession('account-a-task', { deviceId: 'studio', messageClientId: 'reply' });
+    owner.generation += 1;
+    expect(takePendingDeepLink()).toBeNull();
+    handleIncomingDeepLink('cindy://session/external-task', 'open-url');
+    owner.generation += 1;
+    expect(takePendingDeepLink()).toEqual({ type: 'session', id: 'external-task' });
+  });
+
   it('buffers only the opaque provider import id during cold start', () => {
     setDeepLinkMainWindow(null);
     handleIncomingDeepLink(providerImportUrl('cindy'), 'test');
@@ -692,5 +717,38 @@ describe('findOpenShareFileInArgv', () => {
         '/tmp/team.cshare',
       ]),
     ).toBe('/tmp/team.cshare');
+  });
+});
+
+
+describe('public plugin links are navigation only', () => {
+  const id = 'c123456789012345678901234';
+  it('opens exactly the referenced market resource', () => {
+    expect(parseDeepLink(`cindy://plugin/${id}`)).toEqual({ type: 'plugin', pluginId: id });
+  });
+  it.each(['?install=1', '?url=https://example.test/package', '/releases/release', '#auto', '/../other'])('rejects extra behavior %s', suffix => {
+    expect(parseDeepLink(`cindy://plugin/${id}${suffix}`)).toBeNull();
+  });
+  it('does not accept ghost names as server resource IDs', () => {
+    expect(parseDeepLink('cindy://plugin/cindy-github')).toBeNull();
+  });
+});
+
+// A local share is a fixed package, never a market ID or an automatic install.
+// Unit: the real parser and pending handoff need no server or real Electron app.
+describe('fixed local plugin share navigation', () => {
+  const snapshotId = 'a'.repeat(32);
+  it('keeps the exact snapshot through the loaded login page', () => {
+    const window = { isDestroyed: () => false, isVisible: () => true, isMinimized: () => false, show: vi.fn(), focus: vi.fn(),
+      restore: vi.fn(), moveTop: vi.fn(), setAlwaysOnTop: vi.fn(),
+      webContents: { isLoading: () => false, send: vi.fn() } } as unknown as BrowserWindow;
+    setDeepLinkMainWindow(window);
+    handleIncomingDeepLink(`cindy://plugin-share/${snapshotId}`, 'open-url');
+    expect(takePendingDeepLink()).toEqual({ type: 'local-plugin-share', snapshotId });
+    expect(takePendingDeepLink()).toBeNull();
+    setDeepLinkMainWindow(null);
+  });
+  it.each(['?install=1', '?url=https://example.test/file', '#auto', '/other', '/../other'])('rejects extra behavior %s', suffix => {
+    expect(parseDeepLink(`cindy://plugin-share/${snapshotId}${suffix}`)).toBeNull();
   });
 });
