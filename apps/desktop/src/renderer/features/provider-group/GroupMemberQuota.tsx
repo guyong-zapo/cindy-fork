@@ -17,6 +17,8 @@ import { getDataOwnerGeneration, isDataOwnerGenerationCurrent } from '@/contexts
 import { cn } from '@/lib/utils';
 
 import type { ProviderGroupMember } from '../../../shared/providerGroup';
+import type { ProviderView } from '@cindy/model-providers';
+import { isKimiCodingProviderView } from '../../../shared/kimiCodingUsage';
 
 /** 这台电脑的额度从哪读。 */
 export type GroupMemberQuotaTarget =
@@ -228,7 +230,32 @@ export function GroupMemberQuota({
         : target.kind === 'device' && remoteDeviceId
           ? deviceCatalog.providers.find((entry) => entry.id === target.providerId)
           : undefined;
-  const card = useDeviceProviderSubscriptionCard(provider, remoteDeviceId, { live: true });
+  // A liveness gate pauses Kimi observation without replacing an already
+  // authorized query identity. Provider-list reads still stop while offline.
+  // Retain through catalog recovery loading/errors, then use its fresh
+  // identity (or removal). Explicit permission revocation cancels retention.
+  const retainedKimi = useRef<{ owner: typeof owner; deviceId: string; provider: ProviderView } | null>(null);
+  const controlDenied = targetDeviceId !== null && (
+    (control?.owner === owner ? control.disabledDeviceIds.includes(targetDeviceId)
+      : directoryRequest.status === 'ready' && device?.controlEnabled === false) ||
+    (currentPresence?.remoteControlEnabled ?? device?.remoteControlEnabled) === false ||
+    (directoryRequest.status === 'ready' && devices !== null && !device)
+  );
+  const pausedKimi = target.kind === 'device' && !controlDenied && !provider &&
+    (quotaOffline || deviceCatalog.loading || deviceCatalog.error) && retainedKimi.current?.owner === owner &&
+    retainedKimi.current.deviceId === target.deviceId && retainedKimi.current.provider.id === target.providerId
+      ? retainedKimi.current : null;
+  useLayoutEffect(() => {
+    if (target.kind === 'device' && provider && isKimiCodingProviderView(provider) &&
+      provider.connected && !provider.removed && !provider.suspended) {
+      retainedKimi.current = { owner, deviceId: target.deviceId, provider };
+    } else if (!pausedKimi) retainedKimi.current = null;
+  }, [owner, target, provider, pausedKimi]);
+  const card = useDeviceProviderSubscriptionCard(
+    provider ?? pausedKimi?.provider,
+    pausedKimi?.deviceId ?? remoteDeviceId,
+    { live: true, active: !quotaOffline && !!provider },
+  );
   const [waitedOut, setWaitedOut] = useState(false);
   const waitKey = target.kind === 'share' ? '' : `${remoteDeviceId ?? ''}\n${target.providerId}`;
   useEffect(() => {

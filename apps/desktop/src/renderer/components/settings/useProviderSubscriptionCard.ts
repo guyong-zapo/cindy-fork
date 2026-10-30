@@ -184,7 +184,7 @@ function useRemoteProviderSubscriptionCard(
 export function useDeviceProviderSubscriptionCard(
   provider: ProviderView | undefined,
   deviceId: string | null,
-  options: { live?: boolean } = {},
+  options: { live?: boolean; active?: boolean } = {},
 ): UsageCardAccount | null {
   const visible = useDocumentVisible(options.live === true);
   const [nativeVisible, setNativeVisible] = useState(
@@ -200,7 +200,7 @@ export function useDeviceProviderSubscriptionCard(
     observer.observe(document.documentElement, { attributes: true, attributeFilter: [HIDDEN_ANIMATION_ATTR] });
     return () => observer.disconnect();
   }, [options.live]);
-  const active = !options.live || (visible && nativeVisible);
+  const active = !options.live || (options.active !== false && visible && nativeVisible);
   const activeProvider = active ? provider : undefined;
   const source = activeProvider
     ? providerWeeklyQuotaSource({ ...activeProvider, suspended: false })

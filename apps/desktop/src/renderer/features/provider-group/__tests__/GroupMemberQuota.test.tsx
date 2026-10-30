@@ -9,6 +9,7 @@ import { act, cleanup, render, screen } from '@testing-library/react';
 import type { ReactElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setDataOwnerGeneration } from '@/contexts/dataOwnerGeneration';
+import type { UsageCardAccount } from '@/components/status/usageCardModel';
 
 vi.mock('react-i18next', () => ({
   initReactI18next: { type: '3rdParty', init: () => undefined },
@@ -27,6 +28,8 @@ const mocks = vi.hoisted(() => ({
   control: new Set<(snapshot: { deviceId: string; enabled: boolean; disabledControlDeviceIds: string[] }) => void>(),
   status: new Set<(snapshot: { status: string }) => void>(),
   getState: vi.fn(),
+  realCard: false,
+  catalogState: 'ready' as 'ready' | 'loading' | 'error',
 }));
 
 vi.mock('@/hooks/useProviders', () => ({ useProviders: () => ({ providers: mocks.local }) }));
@@ -37,18 +40,25 @@ vi.mock('@/features/device-link/useDeviceLinkDeviceList', () => ({
 vi.mock('@/hooks/useDeviceProviders', () => ({
   useDeviceProviders: (deviceId?: string) => {
     mocks.deviceReads.push(deviceId);
-    return { providers: deviceId ? (mocks.byDevice[deviceId] ?? []) : [], loading: false, error: null, unsupported: false };
+    return { providers: deviceId && mocks.catalogState === 'ready' ? (mocks.byDevice[deviceId] ?? []) : [],
+      loading: !!deviceId && mocks.catalogState === 'loading',
+      error: deviceId && mocks.catalogState === 'error' ? 'catalog unavailable' : null, unsupported: false };
   },
 }));
-vi.mock('@/components/settings/useProviderSubscriptionCard', () => ({
-  useDeviceProviderSubscriptionCard: (provider: { id: string } | undefined, deviceId: string | null) => {
+vi.mock('@/components/settings/useProviderSubscriptionCard', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/components/settings/useProviderSubscriptionCard')>();
+  return { ...actual, useDeviceProviderSubscriptionCard: (...args: Parameters<typeof actual.useDeviceProviderSubscriptionCard>) => {
+    if (mocks.realCard) return actual.useDeviceProviderSubscriptionCard(...args);
+    const [provider, deviceId] = args;
     mocks.cardReads.push([provider?.id, deviceId]);
     return provider ? (mocks.cards[`${deviceId ?? 'local'}:${provider.id}`] ?? null) : null;
-  },
-}));
+  } };
+});
 vi.mock('@/components/status/QuotaHoverCard', () => ({
-  QuotaHoverCard: ({ account, hideIdentity }: { account: { title: string }; hideIdentity?: boolean }) => (
-    <div data-testid="quota-card" data-hide-identity={String(Boolean(hideIdentity))}>
+  QuotaHoverCard: ({ account, hideIdentity }: { account: UsageCardAccount; hideIdentity?: boolean }) => (
+    <div data-testid="quota-card" data-hide-identity={String(Boolean(hideIdentity))}
+      data-usage={JSON.stringify(account.windows?.map(window => window.window.utilization))}
+      data-notices={JSON.stringify(account.notices)}>
       {account.title}
     </div>
   ),
@@ -70,6 +80,8 @@ async function show(target: GroupMemberQuotaTarget, offline = false) {
 }
 
 beforeEach(() => {
+  mocks.realCard = false;
+  mocks.catalogState = 'ready';
   setDataOwnerGeneration('quota-owner');
   mocks.presence.clear();
   mocks.status.clear();
@@ -105,6 +117,78 @@ afterEach(() => {
 });
 
 describe('GroupMemberQuota', () => {
+  // Unit r4422287440 / §10: the old group tests replaced the card hook, so
+  // they missed its pending Kimi identity being destroyed by a new offline poll.
+  // Real group/card/account hooks must retain the first result and queue one
+  // reread on member recovery; explicit control revocation must still cancel it.
+  it.each(['presence', 'directory', 'catalog', 'revocation'] as const)('retains pending Kimi quota through group recovery via %s', async recovery => {
+    vi.useFakeTimers();
+    mocks.realCard = true;
+    mocks.getState.mockResolvedValue({ linkStatus: 'online', disabledControlDeviceIds: [] });
+    mocks.byDevice.mini = [{ ...apiKey('kimi-code'), auth: { method: 'apiKey' },
+      routing: { codex: { upstream: 'https://api.kimi.com/coding/v1' } } }];
+    const value = (usedPercent: number) => ({ status: 'ready', stale: false, snapshot: {
+      kind: 'kimi-coding-quota', fetchedAt: Date.now(), windows: [{ id: 'limit_7d', usedPercent, resetsAt: null }],
+    } });
+    let finish!: (result: ReturnType<typeof value>) => void;
+    const invoke = vi.fn().mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }))
+      .mockRejectedValue(new Error('recovery reread failed'));
+    Object.assign(window.electronAPI.deviceLink, { invoke });
+    let offline = false;
+    const view = () => <GroupMemberQuota id="quota" target={{ kind: 'device', deviceId: 'mini', providerId: 'kimi-code' }} offline={offline} />;
+    const mounted = await mountQuota(view());
+    expect(invoke).toHaveBeenCalledTimes(1);
+    offline = true;
+    mocks.directoryStatus = 'error';
+    mounted.rerender(view());
+    expect(screen.getByText('providerGroup.member.quota.offline')).toBeTruthy();
+    expect(mocks.deviceReads.at(-1)).toBeUndefined();
+    await act(async () => vi.advanceTimersByTime(45_000));
+    expect(invoke).toHaveBeenCalledTimes(1);
+    if (recovery === 'catalog') mocks.catalogState = 'loading';
+    if (recovery === 'revocation') act(() => mocks.control.forEach(listener => listener({
+      deviceId: 'mini', enabled: false, disabledControlDeviceIds: ['mini'],
+    })));
+    if (recovery === 'directory') {
+      mocks.directoryStatus = 'ready';
+      mocks.devices = [...mocks.devices!];
+      mounted.rerender(view());
+    } else act(() => mocks.presence.forEach(listener => listener({
+      deviceId: 'mini', online: true, remoteControlEnabled: true,
+    } as DeviceLinkPresenceSnapshot)));
+    expect(invoke).toHaveBeenCalledTimes(1);
+    if (recovery === 'catalog') {
+      mocks.catalogState = 'error';
+      mounted.rerender(view());
+      await act(async () => finish(value(38)));
+      expect(screen.queryByTestId('quota-card')).toBeNull();
+      expect(invoke).toHaveBeenCalledTimes(1);
+      mocks.catalogState = 'ready';
+      mounted.rerender(view());
+      await act(async () => {});
+    } else {
+      await act(async () => finish(value(38)));
+    }
+    if (recovery === 'revocation') {
+      expect(invoke).toHaveBeenCalledTimes(1);
+      expect(screen.queryByTestId('quota-card')).toBeNull();
+      invoke.mockResolvedValue(value(76));
+      await act(async () => mocks.control.forEach(listener => listener({
+        deviceId: 'mini', enabled: true, disabledControlDeviceIds: [],
+      })));
+      expect(invoke).toHaveBeenCalledTimes(2);
+    } else {
+      expect(invoke).toHaveBeenCalledTimes(2);
+      expect(screen.getByTestId('quota-card').getAttribute('data-usage')).toBe('[38]');
+      expect(screen.getByTestId('quota-card').getAttribute('data-notices')).toContain('providerAccountUsage.kimi.stale');
+      invoke.mockResolvedValue(value(76));
+      await act(async () => vi.advanceTimersByTime(15_000));
+      expect(invoke).toHaveBeenCalledTimes(3);
+    }
+    expect(screen.getByTestId('quota-card').getAttribute('data-usage')).toBe('[76]');
+    expect(invoke.mock.calls.every(call => call[0] === 'mini' && call[1] === 'maker:usage:kimi-coding')).toBe(true);
+  });
+
   // Unit r4389934292: the row was collapsed during reconnect, so no local
   // status history exists. An initial online seed + retained loading/error
   // directory must wait for a new target presence or authoritative list.
