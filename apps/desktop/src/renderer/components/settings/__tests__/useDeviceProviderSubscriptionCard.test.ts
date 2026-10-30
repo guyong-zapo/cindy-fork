@@ -102,6 +102,7 @@ import { useProviderUsageSnapshots, useProviderWeeklyQuota } from '../../new-cha
 import { matchCodexBucketForModel } from '@cindy/maker-shared/codex-usage-buckets';
 import { useCodexRateLimits } from '@/hooks/useCodexRateLimits';
 import { installHiddenAnimationGate } from '@/lib/hiddenAnimationGate';
+import { createCodexRateLimitResetService } from '../../../../main/usage/codexRateLimitReset';
 
 function provider(id: string, auth: Record<string, unknown>): ProviderView {
   return { id, name: id, source: 'user', connected: true, auth } as unknown as ProviderView;
@@ -1007,6 +1008,50 @@ describe('useDeviceProviderSubscriptionCard', () => {
     expect(remaining(hook.result.current)).toEqual([['primary', 50]]);
     expect(hook.result.current?.planLabel).toBe('Pro');
     expect(hook.result.current?.details).toContain('todaySpend.codex.creditsLine');
+  });
+
+  // Unit r4422091216 / §10: previous fixtures used raw IDs in both replies.
+  // Use the actual host read façade's masked identity through both card paths:
+  // same-account window/plan/credits fallback works, while a failed A mirror
+  // cannot supply B; recovering B's mirror restores the visible fallback.
+  it.each([null, 'mini'])('matches the host Codex display identity on %s', async deviceId => {
+    mocks.realLocalAccount = true;
+    const providerId = 'openai-masked-identity';
+    const openai = provider(providerId, { method: 'oauth', native: 'codex' });
+    let identity = 'workspace-account-123456789';
+    let mirrorFails = false;
+    const service = createCodexRateLimitResetService({
+      readAccountIdentity: async () => ({ accountId: identity, email: 'quota@example.invalid' }),
+      readRateLimits: async () => ({ rateLimits: { planType: 'unknown' }, rateLimitsByLimitId: null, rateLimitResetCredits: null }),
+      recordRateLimitSnapshot: async () => {},
+      consumeResetCredit: vi.fn().mockRejectedValue(new Error('not used by read-only cards')),
+    });
+    const readNative = async () => ({ ...await service.read(), providerId });
+    const readMirror = async () => {
+      if (mirrorFails) throw new Error('account mirror reread failed');
+      return { providerId, accountId: identity, planType: 'pro',
+        primary: { usedPercent: 50, windowMinutes: 300 },
+        credits: { hasCredits: true, unlimited: false, balance: '5' } };
+    };
+    mocks.readLocal.mockImplementation(readNative);
+    Object.assign(window.electronAPI.maker.usage, { getAccount: readMirror });
+    invoke.mockImplementation(async (_deviceId, channel) => channel === 'maker:usage:account' ? readMirror() : readNative());
+    const card = renderHook(() => useDeviceProviderSubscriptionCard(openai, deviceId, { live: true }));
+    await act(async () => {});
+    expect(remaining(card.result.current)).toEqual([['primary', 50]]);
+    expect(card.result.current?.planLabel).toBe('Pro');
+    expect(card.result.current?.details).toContain('todaySpend.codex.creditsLine');
+    identity = 'workspace-account-987654321';
+    mirrorFails = true;
+    await act(async () => vi.advanceTimersByTime(15_000));
+    expect(remaining(card.result.current)).toEqual([]);
+    expect(card.result.current?.planLabel).not.toBe('Pro');
+    expect(card.result.current?.details).not.toContain('todaySpend.codex.creditsLine');
+    mirrorFails = false;
+    await act(async () => vi.advanceTimersByTime(15_000));
+    expect(remaining(card.result.current)).toEqual([['primary', 50]]);
+    expect(card.result.current?.planLabel).toBe('Pro');
+    expect(card.result.current?.details).toContain('todaySpend.codex.creditsLine');
   });
 
   // Unit r4391955043 / §10: native-only recovery mocked the local account

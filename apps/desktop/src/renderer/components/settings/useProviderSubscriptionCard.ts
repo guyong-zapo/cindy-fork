@@ -55,10 +55,18 @@ export function buildSettingsCodexUsageCard(
   nowMs: number,
   locale?: string,
 ): UsageCardAccount {
-  // A successful native read owns the account identity. A failed legacy read
-  // can retain another account, so bind every fallback field to matching IDs.
-  // Older hosts without a native snapshot retain their legacy fallback.
-  const fallback = !snapshot || (snapshot.account.accountId && snapshot.account.accountId === account?.accountId)
+  // The host's native read displays only … + the final six account-ID chars;
+  // the usage mirror keeps the full ID. Compare in that existing display form
+  // only for masked native replies; older raw replies still require exact IDs.
+  const nativeAccountId = snapshot?.account.accountId;
+  const mirrorAccountId = account?.accountId;
+  const sameAccount = nativeAccountId && mirrorAccountId && (
+    nativeAccountId === mirrorAccountId ||
+    (nativeAccountId.startsWith('…') && nativeAccountId === `…${mirrorAccountId.slice(-6)}`)
+  );
+  // Missing identity cannot bind old fallback data. Older hosts without a
+  // native snapshot retain their legacy fallback; no wire identity is changed.
+  const fallback = !snapshot || sameAccount
     ? account
     : null;
   const direct = snapshot
