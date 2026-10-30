@@ -305,6 +305,7 @@ describe('useDeviceProviderSubscriptionCard', () => {
     expect(invoke).toHaveBeenCalledTimes(2);
     expect(remaining(hook.result.current)).toEqual([['limit_7d', 38]]);
     expect(hook.result.current?.notices).toEqual([{ text: 'providerAccountUsage.kimi.stale', tone: 'warn' }]);
+    expect(invoke.mock.calls.map(call => call[3])).toEqual([undefined, undefined]);
   });
 
   it('refreshes settled Kimi quota on the target peer reconnect without waiting a minute', async () => {
@@ -741,21 +742,34 @@ describe('useDeviceProviderSubscriptionCard', () => {
   // only one account. Run the real admission scheduler at the preload boundary:
   // at most four automatic reads may start, and opening another card must work
   // immediately without waiting for any of those reads to finish.
-  it('keeps periodic quota reads in background slots so opening another account is responsive', async () => {
+  // r4421913789 adds Kimi's separate reader: twelve slow accounts would fill
+  // foreground capacity. Keep the same visible-result/admission regression.
+  it.each(['codex', 'kimi'] as const)('keeps periodic quota reads in background slots for %s so another account opens', async source => {
     const scheduler = new InvokeScheduler();
-    const accounts = Array.from({ length: 6 }, (_, index) =>
-      provider(`openai-${index}`, { method: 'oauth', native: 'codex' }));
+    const makeProvider = (id: string) => source === 'codex'
+      ? provider(id, { method: 'oauth', native: 'codex' })
+      : Object.assign(provider(id, { method: 'apiKey' }), {
+        routing: { codex: { upstream: 'https://api.kimi.com/coding/v1' } },
+      });
+    const accounts = Array.from({ length: source === 'codex' ? 6 : 12 }, (_, index) => makeProvider(`account-${index}`));
     const automaticIds = new Set(accounts.map(account => account.id));
     const releases: Array<() => void> = [];
     let polling = false;
     let started = 0;
     mocks.invoke.mockImplementation((deviceId, channel, args, scheduling?: { background?: boolean }) =>
       scheduler.run(deviceId, resolveInvokePriority(channel, scheduling?.background), 30_000, async () => {
-        const providerId = args[channel === 'maker:usage:account' ? 1 : 0];
+        const providerId = channel === 'maker:usage:kimi-coding' ? args[0].providerId
+          : args[channel === 'maker:usage:account' ? 1 : 0];
         if (polling && automaticIds.has(providerId)) {
           started++;
           await new Promise<void>(resolve => releases.push(resolve));
         }
+        if (channel === 'maker:usage:kimi-coding') return {
+          status: 'ready', stale: false, snapshot: {
+            kind: 'kimi-coding-quota', fetchedAt: Date.now(),
+            windows: [{ id: 'limit_7d', usedPercent: 91, resetsAt: null }],
+          },
+        };
         const quota = { primary: { usedPercent: 91, windowMinutes: 300 } };
         return channel === 'maker:usage:account' ? { providerId, ...quota }
           : { providerId, account: { planType: 'plus' }, rateLimits: quota };
@@ -768,9 +782,9 @@ describe('useDeviceProviderSubscriptionCard', () => {
     await act(async () => { vi.advanceTimersByTime(15_000); });
     expect(started).toBe(4);
     const opened = renderHook(() => useDeviceProviderSubscriptionCard(
-      provider('openai-opened', { method: 'oauth', native: 'codex' }), 'mini', { live: true }));
+      makeProvider('account-opened'), 'mini', { live: true }));
     await act(async () => {});
-    expect(remaining(opened.result.current)).toEqual([['primary', 91]]);
+    expect(remaining(opened.result.current)).toEqual([[source === 'codex' ? 'primary' : 'limit_7d', 91]]);
     polling = false;
     await act(async () => { releases.forEach(resolve => resolve()); });
   });
@@ -952,18 +966,21 @@ describe('useDeviceProviderSubscriptionCard', () => {
 
   // Unit r4421585003 / §10: inverse of the stale-native regression above.
   // A succeeds with credits, then B's native read succeeds while its mirror
-  // reread fails; absent or different native identity must not borrow A's cash.
+  // reread fails; absent or different native identity must not borrow A's data.
+  // r4421913783 adds a windowless B response: quota and plan need the same fence.
   it.each([
-    { mode: 'remount', accountId: null },
-    { mode: 'reconnect', accountId: 'account-b' },
-  ] as const)('fences legacy credits after an account switch on $mode', async ({ mode, accountId }) => {
+    { mode: 'remount', accountId: null, usedPercent: 91 },
+    { mode: 'reconnect', accountId: 'account-b', usedPercent: 91 },
+    { mode: 'remount', accountId: null, usedPercent: null },
+  ] as const)('fences legacy account data on $mode with native windows $usedPercent', async ({ mode, accountId, usedPercent }) => {
     const openai = provider('openai-credit-switch', { method: 'oauth', native: 'codex' });
-    const native = (id: string | null, usedPercent: number) => ({
-      providerId: openai.id, account: { accountId: id, planType: 'plus' },
-      rateLimits: { primary: { usedPercent, windowMinutes: 300 } },
+    const native = (id: string | null, used: number | null) => ({
+      providerId: openai.id, account: { accountId: id, planType: used === null ? 'unknown' : 'plus' },
+      rateLimits: used === null ? {} : { primary: { usedPercent: used, windowMinutes: 300 } },
+      rateLimitsByLimitId: null,
     });
     const account = (id: string) => ({
-      providerId: openai.id, accountId: id,
+      providerId: openai.id, accountId: id, planType: 'pro',
       primary: { usedPercent: 50, windowMinutes: 300 },
       credits: { hasCredits: true, unlimited: false, balance: '5' },
     });
@@ -975,18 +992,20 @@ describe('useDeviceProviderSubscriptionCard', () => {
     if (mode === 'remount') hook.unmount();
     invoke.mockImplementation(async (_deviceId, channel) => {
       if (channel === 'maker:usage:account') throw new Error('account mirror reread failed');
-      return native(accountId, 91);
+      return native(accountId, usedPercent);
     });
     if (mode === 'remount') hook = renderHook(() => useDeviceProviderSubscriptionCard(openai, 'mini', { live: true }));
     else act(() => mocks.reopened.forEach(listener => listener({ deviceId: 'mini' })));
     await act(async () => {});
-    expect(remaining(hook.result.current)).toEqual([['primary', 91]]);
+    expect(remaining(hook.result.current)).toEqual(usedPercent === null ? [] : [['primary', 91]]);
+    expect(hook.result.current?.planLabel).not.toBe('Pro');
     expect(hook.result.current?.details).not.toContain('todaySpend.codex.creditsLine');
-    // Once both sources name B, credits can be shown again.
+    // Once both sources name B, window/plan/credit fallback is safe again.
     invoke.mockImplementation(async (_deviceId, channel) => channel === 'maker:usage:account'
-      ? account('account-b') : native('account-b', 96));
+      ? account('account-b') : native('account-b', null));
     await act(async () => vi.advanceTimersByTime(15_000));
-    expect(remaining(hook.result.current)).toEqual([['primary', 96]]);
+    expect(remaining(hook.result.current)).toEqual([['primary', 50]]);
+    expect(hook.result.current?.planLabel).toBe('Pro');
     expect(hook.result.current?.details).toContain('todaySpend.codex.creditsLine');
   });
 

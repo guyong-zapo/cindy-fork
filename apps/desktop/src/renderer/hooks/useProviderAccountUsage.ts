@@ -85,7 +85,7 @@ export function useProviderAccountUsage(
   }), [identity, supported, live]);
 
   const load = useCallback(
-    async (forceRefresh: boolean): Promise<void> => {
+    async (forceRefresh: boolean, scheduling?: { background?: boolean }): Promise<void> => {
       if (!supported || !provider?.id) return;
       if (live && !forceRefresh && lifecycle.pending > 0) return;
       if (forceRefresh) lifecycle.liveRefreshes.clear();
@@ -105,7 +105,9 @@ export function useProviderAccountUsage(
           ...(agent ? { agent } : {}),
         };
         const next = deviceId
-          ? parseKimiAccountUsageResult(await window.electronAPI.deviceLink.invoke(deviceId, 'maker:usage:kimi-coding', [input]))
+          ? parseKimiAccountUsageResult(await (scheduling
+              ? window.electronAPI.deviceLink.invoke(deviceId, 'maker:usage:kimi-coding', [input], scheduling)
+              : window.electronAPI.deviceLink.invoke(deviceId, 'maker:usage:kimi-coding', [input])))
           : await window.electronAPI.maker.fetchProviderAccountUsage(input);
         if (id === requestId.current && isDataOwnerGenerationCurrent(owner)) setState({ identity, result: next, busy: false });
       } catch {
@@ -164,7 +166,7 @@ export function useProviderAccountUsage(
     void load(false);
     // Expanded group cards use the 15s cadence; ordinary readers keep one minute.
     // Pending live reads are coalesced by load, and hidden cards have no timer.
-    const timer = window.setInterval(() => void load(false), live ? 15_000 : REFRESH_INTERVAL_MS);
+    const timer = window.setInterval(() => void load(false, { background: true }), live ? 15_000 : REFRESH_INTERVAL_MS);
     return () => {
       window.clearInterval(timer);
       lifecycle.liveRefreshes.delete(recovery);

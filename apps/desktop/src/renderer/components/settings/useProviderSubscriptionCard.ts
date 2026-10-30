@@ -55,6 +55,12 @@ export function buildSettingsCodexUsageCard(
   nowMs: number,
   locale?: string,
 ): UsageCardAccount {
+  // A successful native read owns the account identity. A failed legacy read
+  // can retain another account, so bind every fallback field to matching IDs.
+  // Older hosts without a native snapshot retain their legacy fallback.
+  const fallback = !snapshot || (snapshot.account.accountId && snapshot.account.accountId === account?.accountId)
+    ? account
+    : null;
   const direct = snapshot
     ? matchCodexBucketForModel(
         snapshot.rateLimitsByLimitId ?? {
@@ -70,17 +76,12 @@ export function buildSettingsCodexUsageCard(
       ? direct
       : direct?.primary || direct?.secondary
         ? direct
-        : account;
-  const planType = [snapshot?.account.planType, direct?.planType, account?.planType].find(
+        : fallback;
+  const planType = [snapshot?.account.planType, direct?.planType, fallback?.planType].find(
     (value) =>
       typeof value === 'string' && value.trim() && value.trim().toLowerCase() !== 'unknown',
   );
-  // A native read can succeed after an account switch while the legacy read
-  // fails and retains its old balance. Only combine explicitly matching IDs;
-  // an unbound native identity cannot establish ownership of fallback credits.
-  const credits = !snapshot || (snapshot.account.accountId && snapshot.account.accountId === account?.accountId)
-    ? account?.credits
-    : undefined;
+  const credits = fallback?.credits;
   return buildCodexUsageCard(
     quota || planType ? { ...quota, planType, credits } : null,
     null, // Reset count and expiry belong to the collapsible reset list.
