@@ -2278,6 +2278,18 @@
       "note": "模型目录维护的权威协议；独立于各 Harness 的实际接入配置。设置面板用于简短对比原生支持与兼容模式。"
     },
     {
+      "id": "model-upstream-apis",
+      "status": "proposed",
+      "en": "Upstream APIs",
+      "translations": {
+        "zh-CN": "上游接口",
+        "zh-TW": "上游介面",
+        "ja": "上流 API",
+        "ko": "업스트림 API"
+      },
+      "note": "模型设置「引擎支持」顶部只读列出当前来源为该模型提供的全部接口（Messages / Responses / Chat Completions / Google Gemini），替代旧的单值「原生协议」。上游提供的接口按原生使用，只有 Cindy 本地转换才标兼容模式（2026-10-30）。"
+    },
+    {
       "id": "qwen-model-brand",
       "status": "proposed",
       "en": "Qwen",
@@ -2617,6 +2629,18 @@
       },
       "checkCase": false,
       "note": "Codex 模型的第三档速度；与推理深度 Ultra 独立。标准、快速、超快分别对应默认、Fast、Ultrafast。"
+    },
+    {
+      "id": "performance-trace",
+      "status": "proposed",
+      "en": "Performance Trace",
+      "translations": {
+        "zh-CN": "性能跟踪",
+        "zh-TW": "效能追蹤",
+        "ja": "パフォーマンスの記録",
+        "ko": "성능 기록"
+      },
+      "note": "用户按需录制 Cindy 性能现场的诊断入口；完整轨迹留在本地，结构化报告经用户提交。"
     }
   ]
 }

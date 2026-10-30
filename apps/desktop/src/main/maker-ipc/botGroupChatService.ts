@@ -262,6 +262,7 @@ interface LaneWaiter {
   clientId: string;
   accepted: boolean;
   settle: (outcome: TurnOutcome) => void;
+  refreshPendingInteraction?: () => void;
 }
 
 interface ActiveRound {
@@ -909,25 +910,58 @@ export function createBotGroupChatService(deps: BotGroupChatServiceDeps) {
   ): Promise<TurnOutcome> =>
     new Promise<TurnOutcome>((resolve) => {
       let timer: ReturnType<typeof setTimeout> | null = null;
+      let remainingMs = timeoutMs;
+      let runningSince: number | null = null;
+      let finished = false;
+      const finish = (outcome: TurnOutcome) => {
+        finished = true;
+        if (timer !== null) clearTimeout(timer);
+        timer = null;
+        waiter.refreshPendingInteraction = undefined;
+        resolve(outcome);
+      };
       const arm = () => {
+        // Elapsed runtime must not depend on wall-clock corrections or DB timestamps.
+        runningSince = performance.now();
         timer = setTimeout(() => {
-          // A turn waiting on the user's approval or answer is not late.
+          timer = null;
+          // Also check the pending source at an already-due timeout boundary.
           if (deps.hasPendingInteraction?.(sessionId)) {
-            arm();
+            refresh();
             return;
           }
           if (waiters.get(sessionId) === waiter) waiters.delete(sessionId);
           interruptedLanes.add(sessionId);
           void deps.abortLane(sessionId).catch(() => undefined);
-          resolve({ kind: 'failed', notice: 'member-timeout', failureCode: 'RUNTIME_TIMEOUT' });
-        }, timeoutMs);
+          finish({ kind: 'failed', notice: 'member-timeout', failureCode: 'RUNTIME_TIMEOUT' });
+        }, remainingMs);
       };
-      arm();
-      void promise.then((outcome) => {
-        if (timer) clearTimeout(timer);
-        resolve(outcome);
-      });
+      const refresh = () => {
+        if (finished) return;
+        if (deps.hasPendingInteraction?.(sessionId)) {
+          if (runningSince === null) return;
+          remainingMs = Math.max(0, remainingMs - (performance.now() - runningSince));
+          runningSince = null;
+          if (timer !== null) clearTimeout(timer);
+          timer = null;
+        } else if (runningSince === null) {
+          arm();
+        }
+      };
+      waiter.refreshPendingInteraction = refresh;
+      refresh();
+      void promise.then(finish);
     });
+
+  /** Router start precedes Desktop pending registration; setup terminal precedes complete(). */
+  const refreshPendingInteraction = (sessionId: string) => {
+    const waiter = waiters.get(sessionId);
+    if (!waiter) return;
+    queueMicrotask(() => {
+      // A late end notification must not resume a replacement turn's budget.
+      if (waiters.get(sessionId) === waiter) waiter.refreshPendingInteraction?.();
+    });
+  };
 
   const runMemberTurn = async (
     group: GroupRow,
@@ -2209,10 +2243,10 @@ export function createBotGroupChatService(deps: BotGroupChatServiceDeps) {
     retryPlan: (input: unknown) => planAction('retry', input),
     editPlanStep,
     settleLaneTurn,
+    refreshPendingInteraction,
     /** Only a server room has a message channel a teammate can post into outside a turn. */
     postCompanionTaskMessage: async (_input: BotGroupTaskPostInput): Promise<BotGroupTaskPostResult> =>
       ({ ok: false, errorCode: 'GROUP_CHANNEL_UNAVAILABLE', retryable: false }),
-    hasCompanionTaskChannel: async (_groupId: string): Promise<boolean> => false,
     dispose,
   };
 }
@@ -2224,7 +2258,10 @@ export interface BotGroupTaskPostInput {
   /** Idempotent per event: retries return the message the server already stored. */
   clientId: string;
   text: string;
-  card: BotGroupTaskCard;
+  card?: BotGroupTaskCard;
+  /** Generic task outboxes freeze the same wire payload without a delegation row. */
+  preparePost?: (prepare: () => Promise<import('./botGroupTaskPostSnapshot.js').BotGroupTaskPostSnapshot>,
+    destination: { endpoint: string; selfId: string; roomId: string; clientId: string }) => Promise<import('./botGroupTaskPostSnapshot.js').BotGroupTaskPostSnapshot>;
   /** Delivered files, uploaded as this teammate's attachments; unreadable ones are skipped. */
   files?: Array<{ absolutePath: string }>;
   /** A task started in a Thread reports back into that Thread. */

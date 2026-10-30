@@ -1,3 +1,5 @@
+import { isSafeGhostRelativePath as isSafePluginUiPath, getPluginToolUi, validateWithStoredMcpApps, parseGhostMcpApps } from '@cindy/plugin-protocol';
+import { pluginHasToolUi, pluginToolVisible, pluginUiDomains, pluginUiPermissionsExpand } from '@cindy/plugin-protocol';
 import { parseGhostSecretCheck, type GhostSecretCheckDecl } from '@cindy/plugin-protocol';
 import { parseGhostRoutineEvents, type GhostRoutineEvents } from '@cindy/plugin-protocol';
 import { parseMailReader } from '@cindy/maker-shared/mail-message';
@@ -211,6 +213,8 @@ export interface GhostAgentNeeds {
   tasks?: boolean;
   /** 查询项目、任务、伙伴并投递消息;必须同时声明 tasks,需独立批准。 */
   targets?: boolean;
+  /** Independently approved, scoped Auto delegation to an existing companion. */
+  delegation?: boolean;
   /**
    * hiddenTasks = 「可创建不显示在任务列表里的后台任务」(2026-10)。
    *
@@ -353,6 +357,7 @@ export const GHOST_NODE_CHILD_MODE_FLAG = '__cindy-node-child__';
 
 /** worker → 主机:代启/喂 stdin/收 stdin/杀进程。 */
 export type GhostNodeChildToHostMessage =
+  | { type: 'authenticated-fetch'; reqId: string; rpcId: string; authorization: string; request: Record<string, unknown> }
   | { type: 'plugin-authorize'; reqId: string; rpcId: string; request: PluginAuthorizationRequest }
   | { type: 'device-authorize'; reqId: string; rpcId: string; url: string }
   | { type: 'spawn-child'; reqId: string; entry: string; args?: string[]; rpcId?: string }
@@ -362,6 +367,7 @@ export type GhostNodeChildToHostMessage =
 
 /** 主机 → worker:代启结果/子进程输出/退出。 */
 export type GhostNodeChildToWorkerMessage =
+  | { type: 'node-host-result'; reqId: string; ok: boolean; result?: unknown }
   | { type: 'plugin-authorize-result'; reqId: string; ok: boolean; result?: PluginAuthorizationResult }
   | { type: 'device-authorize-result'; reqId: string; ok: boolean }
   | { type: 'spawn-child-result'; reqId: string; ok: true; childId: string; pid?: number }
@@ -378,6 +384,15 @@ function isChildId(v: unknown): v is string {
 export function parseGhostNodeChildToHostMessage(raw: unknown): GhostNodeChildToHostMessage | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const m = raw as Record<string, unknown>;
+  if (m.type === 'authenticated-fetch') {
+    if (!isChildId(m.reqId) || typeof m.rpcId !== 'string' || !/^\d{1,16}$/.test(m.rpcId)) return null;
+    if (Object.keys(m).sort().join(',') !== 'authorization,reqId,request,rpcId,type'
+      || typeof m.authorization !== 'string' || !/^Bearer [A-Za-z0-9._~+\/=-]{1,8192}$/.test(m.authorization)
+      || !m.request || typeof m.request !== 'object' || Array.isArray(m.request)
+      || JSON.stringify(m.request).length > 65536) return null;
+    return { type: m.type, reqId: m.reqId, rpcId: m.rpcId, authorization: m.authorization,
+      request: m.request as Record<string, unknown> };
+  }
   if (m.type === 'plugin-authorize') {
     if (Object.keys(m).sort().join(',') !== 'reqId,request,rpcId,type'
       || !isChildId(m.reqId) || typeof m.rpcId !== 'string' || !/^\d{1,16}$/.test(m.rpcId)) return null;
@@ -1510,6 +1525,8 @@ export function isGhostSetupErrorCode(value: unknown): value is GhostSetupErrorC
 
 /** ghost.json 清单(不变量由 validateGhostManifest 保证)。 */
 export interface GhostManifest {
+  /** Optional MCP Apps resources and links to existing tools. */
+  mcpApps?: unknown;
   /** Optional v3 extension, validated only when projecting homepage recommendations. */
   recommendations?: unknown;
   /** 原始清单格式版本；v2 已在解析边界投影成与 v3 相同的直接字段。 */
@@ -1568,6 +1585,7 @@ export interface GhostManifest {
   agent?: GhostAgentNeeds;
   /** 随包本地 Node 工作进程声明。 */
   node?: GhostNodeNeeds;
+  /** Host-owned MCP services, independently approved. */
   /**
    * 设置页「自定义设置区」界面入口(可选;安装目录内相对路径,意识自绘)。
    * 与面板同款沙箱 webview 渲染(零桥、分区断网、CSP 'self'),主题 token
@@ -1756,6 +1774,10 @@ export interface InstalledGhost {
   taskCapabilityApproved?: true;
   /** Independent Host consent for cross-task/companion target access. */
   targetCapabilityApproved?: true;
+  uiCapabilityApproved?: true;
+  /** Read-only remote management projection; never persisted as approval. */
+  uiPromptSuppressed?: true;
+  delegationCapabilityApproved?: true;
   manifest: GhostManifest;
   /** 安装目录绝对路径(userData/brain/<id> 或 userData/brain/_ns/<org>/<id>)。 */
   dir: string;
@@ -2090,6 +2112,13 @@ export function ghostDeclaresHiddenTasks(manifest: Pick<GhostManifest, 'agent'> 
 
 export function ghostPermissionItems(manifest: GhostManifest): GhostPermissionItem[] {
   const items: GhostPermissionItem[] = [];
+  if (pluginHasToolUi(manifest)) items.push({ key: 'ui:pages', kind: 'panel', labelKey: 'mcpUi',
+    detailKey: 'uiPageAccess', detailArgs: {
+      pages: (getPluginToolUi(manifest)?.resources ?? []).map(resource => resource.uri).sort().join(', ') || '—',
+      domains: pluginUiDomains(manifest).join(', ') || '—',
+      tools: (manifest.tools ?? []).filter(tool => pluginToolVisible(manifest, tool.name, 'app')).map(tool => tool.name).sort().join(', ') || '—',
+    } });
+
   for (const [category, actions] of Object.entries(manifest.cindy ?? {})) {
     if (category === 'oneshotModel') continue; // 偏好模型是标量意图,不是能力键
     if (!Array.isArray(actions)) continue;
@@ -2165,6 +2194,9 @@ export function ghostPermissionItems(manifest: GhostManifest): GhostPermissionIt
     if (manifest.agent?.tasks === true) {
       items.unshift({ key: 'agent:tasks', kind: 'agent', labelKey: 'agentTasks', detailKey: 'agentTasksDetail' });
     }
+    if (manifest.agent?.tasks === true && manifest.agent.targets === true && manifest.agent.delegation === true) {
+      items.unshift({ key: 'agent:delegation', kind: 'agent', labelKey: 'agentDelegation', detailKey: 'agentDelegationDetail' });
+    }
     if (manifest.agent?.tasks === true && manifest.agent.targets === true) {
       items.unshift({ key: 'agent:targets', kind: 'agent', labelKey: 'agentTargets', detailKey: 'agentTargetsDetail' });
     }
@@ -2199,9 +2231,11 @@ export function ghostPermissionItems(manifest: GhostManifest): GhostPermissionIt
     items.unshift({
       key: 'node:execute',
       kind: 'node',
-      labelKey: manifest.node.protocol === 'mcp-stdio' ? 'nodeMcp' : 'nodeRuntime',
+      labelKey: manifest.node ? (manifest.node.protocol === 'mcp-stdio' ? 'nodeMcp' : 'nodeRuntime') : 'nodeMcp',
       detailKey: 'nodeRuntimeDetail',
     });
+  }
+  if (manifest.node) {
     for (const binding of manifest.node.secretBindings ?? []) {
       const targetEntry = binding.entry ?? manifest.node.entry;
       const stableMethods = [...binding.methods].sort();
@@ -2669,6 +2703,12 @@ export function diffGhostPermissionItems(
   const removed: GhostPermissionItem[] = [];
   const unchanged: GhostPermissionItem[] = [];
   for (const item of nextItems) {
+    if (item.key === 'ui:pages' && pluginHasToolUi(next)) {
+      if (pluginUiPermissionsExpand(prev, next)) {
+        added.push(item);
+      } else unchanged.push(item);
+      continue;
+    }
     if (!prevKeys.has(item.key)) {
       added.push(item);
     } else if (ghostPermissionProjectionKey(item) !== prevProjectionByKey.get(item.key)) {
@@ -2678,6 +2718,10 @@ export function diffGhostPermissionItems(
     }
   }
   for (const item of prevItems) {
+    if (item.key === 'ui:pages' && pluginHasToolUi(next)) {
+      if (!nextKeys.has(item.key) || added.some(nextItem => nextItem.key === item.key)) removed.push(item);
+      continue;
+    }
     if (!nextKeys.has(item.key)) {
       removed.push(item);
     } else if (ghostPermissionProjectionKey(item) !== nextProjectionByKey.get(item.key)) {
@@ -2702,7 +2746,9 @@ export function diffInstalledGhostPermissionItems(
   next: GhostManifest,
 ): GhostPermissionDiff {
   if (installed.approval.state === 'approved') {
-    return diffGhostPermissionItems(installed.manifest, next);
+    // Older Hosts preserved ui without granting page capabilities.
+    const previous = { ...installed.manifest, mcpApps: installed.uiCapabilityApproved === true ? installed.manifest.mcpApps : undefined };
+    return diffGhostPermissionItems(previous, next);
   }
   return {
     added: ghostPermissionItems(next),
@@ -3178,6 +3224,7 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 }
 
 const GHOST_MANIFEST_KNOWN_TOP_LEVEL_FIELDS = new Set([
+  'mcpApps',
   'routineEvents',
   'schemaVersion',
   'id',
@@ -4064,9 +4111,14 @@ export function validateGhostManifest(value: unknown): ManifestValidation {
   return validateGhostManifestInput(value, false);
 }
 
+/** Stored market releases tolerate only historical mcpApps; other fields remain strict. */
+export function validateStoredGhostManifest(value: unknown): ManifestValidation {
+  return validateWithStoredMcpApps(value, validateGhostManifest);
+}
+
 /** Installed snapshots retain historical unknown tasks data without granting it. */
 export function validateInstalledGhostManifest(value: unknown): ManifestValidation {
-  return validateGhostManifestInput(value, true);
+  return validateWithStoredMcpApps(value, raw => validateGhostManifestInput(raw, true));
 }
 
 function validateGhostManifestInput(value: unknown, preserveHistoricalTasks: boolean): ManifestValidation {
@@ -4705,10 +4757,16 @@ function validateGhostManifestInput(value: unknown, preserveHistoricalTasks: boo
         return { ok: false, reason: 'agent.targets: true 需要同时声明 agent.tasks: true' };
       }
     }
+    if (!preserveHistoricalTasks && agentRaw.delegation !== undefined) {
+      if (typeof agentRaw.delegation !== 'boolean') return { ok: false, reason: 'agent.delegation must be boolean' };
+      if (agentRaw.delegation === true && (agentRaw.tasks !== true || agentRaw.targets !== true)) {
+        return { ok: false, reason: 'agent.delegation requires agent.tasks and agent.targets' };
+      }
+    }
     if (agentRaw.schedule !== undefined && typeof agentRaw.schedule !== 'boolean') {
       return { ok: false, reason: 'agent.schedule 必须是布尔值' };
     }
-    if (agentRaw.background !== true && agentRaw.errand !== true && agentRaw.schedule !== true && agentRaw.tasks !== true && Object.keys(unknownDeclarationFields(agentRaw, preserveHistoricalTasks ? ['background', 'errand', 'schedule'] : ['background', 'errand', 'schedule', 'tasks', 'hiddenTasks', 'targets'])).length === 0) {
+    if (agentRaw.background !== true && agentRaw.errand !== true && agentRaw.schedule !== true && agentRaw.tasks !== true && Object.keys(unknownDeclarationFields(agentRaw, preserveHistoricalTasks ? ['background', 'errand', 'schedule'] : ['background', 'errand', 'schedule', 'tasks', 'hiddenTasks', 'targets', 'delegation'])).length === 0) {
       return {
         ok: false,
         reason:
@@ -4716,11 +4774,12 @@ function validateGhostManifestInput(value: unknown, preserveHistoricalTasks: boo
       };
     }
     agent = {
-      ...unknownDeclarationFields(agentRaw, preserveHistoricalTasks ? ['background', 'errand', 'schedule'] : ['background', 'errand', 'schedule', 'tasks', 'hiddenTasks', 'targets']),
+      ...unknownDeclarationFields(agentRaw, preserveHistoricalTasks ? ['background', 'errand', 'schedule'] : ['background', 'errand', 'schedule', 'tasks', 'hiddenTasks', 'targets', 'delegation']),
       ...(agentRaw.background === true ? { background: true } : {}),
       ...(agentRaw.errand === true ? { errand: true } : {}),
       ...(agentRaw.tasks === true ? { tasks: true } : {}),
       ...(agentRaw.tasks === true && agentRaw.targets === true ? { targets: true } : {}),
+      ...(agentRaw.tasks === true && agentRaw.targets === true && agentRaw.delegation === true ? { delegation: true } : {}),
       ...(agentRaw.tasks === true && agentRaw.hiddenTasks === true ? { hiddenTasks: true } : {}),
       ...(agentRaw.schedule === true ? { schedule: true } : {}),
     };
@@ -6412,10 +6471,15 @@ function validateGhostManifestInput(value: unknown, preserveHistoricalTasks: boo
     }
   }
 
+  if (raw.mcpApps !== undefined && raw.schemaVersion !== 3) return { ok: false, reason: 'mcpApps requires schemaVersion 3' };
+  const parsedMcpApps = raw.mcpApps === undefined ? undefined : parseGhostMcpApps(raw.mcpApps, tools ?? [], network?.hosts ?? [], isSafePluginUiPath);
+  if (parsedMcpApps === null) return { ok: false, reason: 'mcpApps.ui 页面或工具声明无效，页面域名必须在 network.hosts 内' };
+  const mcpApps = parsedMcpApps;
   return {
     ok: true,
     manifest: {
       ...prepared.unknownV3Fields,
+      ...(mcpApps !== undefined ? { mcpApps } : {}),
       schemaVersion: prepared.schemaVersion,
       id: raw.id,
       name: raw.name,
@@ -6655,6 +6719,10 @@ export type GhostPipeToolResult =
 export interface GhostPipeToolProgress {
   type: 'tool-progress';
   callId: string;
+  /** Optional standard MCP progress; omitted values retain heartbeat semantics. */
+  progress?: number;
+  total?: number;
+  message?: string;
 }
 
 /**
@@ -7013,8 +7081,13 @@ export const GHOST_PICK_MIN_INTERVAL_MS = 3000;
 export interface GhostPipePickRequest {
   type: 'pick-request';
   mobilePageId?: string;
-  /** v1 只支持选目录;将来扩文件类型时在此收窄枚举。 */
-  mode: 'directory';
+  /** 文件模式可选；旧的目录选择行为保持不变。 */
+  mode: 'directory' | 'file';
+  accept?: string[];
+  multiple?: boolean;
+  into?: 'media' | 'library';
+  path?: string;
+  callId?: string;
   /** 选择框内的用途说明(净化后随插件名一起展示,让用户知道谁在要、要来干嘛)。 */
   title?: string;
   /**
@@ -7035,6 +7108,7 @@ export type GhostPipePickResult =
       path?: string;
       /** 目录过户票据(同 ghost_call dir 通道;上传等主机代办凭票取件)。 */
       dir_deposit?: DirDepositReceiptShape;
+      files?: Array<{ name: string; size: number; mimeType: string; ref?: string; sha256?: string; deposit?: DirDepositReceiptShape; path?: string }>;
     }
   | {
       ok: false;
@@ -7044,8 +7118,15 @@ export type GhostPipePickResult =
         | 'CANCELLED'
         | 'RATE_LIMITED'
         | 'BUSY'
+        | 'TOO_LARGE'
+        | 'UNSUPPORTED'
         | 'INTERNAL';
       message: string;
+      limitBytes?: number;
+      /** 文件批次中已导入的引用；后续失败不撤销这些成功写入。 */
+      files?: Extract<GhostPipePickResult, { ok: true }>['files'];
+      /** 首个失败项，index 为选择顺序的零基下标；之后的项尚未处理。 */
+      failedFile?: { index: number; name: string };
     };
 
 /**
@@ -8763,7 +8844,7 @@ export type GhostPipeFsResult =
     }
   | { ok: true; op: 'list'; entries: GhostFsListEntry[]; truncated?: boolean }
   | { ok: true; op: 'delete'; path: string; /** false = 本来就不存在(幂等)。 */ existed: boolean }
-  | { ok: false; message: string };
+  | { ok: false; message: string; errorCode?: 'NOT_FOUND' };
 
 /* ── library 能力:持久作品库(2026-08-20;详见 docs/dev-rules/plugin-library-storage.md)── */
 
@@ -9118,7 +9199,7 @@ export interface GhostPipeFetchRequest {
    * 全部上传文件的总字节数——飞书 upload_all 这类要求 size 字段的服务用,
    * 2026-07-16 lizi_feishu 意识化前置)。
    */
-  upload?: { hashes: string[]; field?: string; fields?: Record<string, string> };
+  upload?: { hashes?: string[]; library?: string[]; field?: string; fields?: Record<string, string> };
   /**
    * 目录上传通道(仅 POST;与 body / upload 互斥):把主机过户票据指向的
    * 本地目录整体以 multipart/form-data 上传——token 来自 ghost_call 顶层
@@ -9144,7 +9225,9 @@ export interface GhostPipeFetchRequest {
    * 任意类型字节由主机直接写进 save 票据指向的 workdir 目录(须同时传
    * saveTo;字节不进沙箱也不进总仓,见 GHOST_SAVE_DEPOSIT_* 常量)。
    */
-  as?: 'text' | 'media' | 'file';
+  as?: 'text' | 'media' | 'file' | 'library';
+  /** as:library 的库内相对目标。 */
+  path?: string;
   /**
    * 下行落盘票据(仅 as:'file',必填):token 来自 ghost_call 顶层 save_dir
    * 过户后注入的 args.save_deposit.token;filename 为建议文件名(可选,主机
@@ -9200,7 +9283,9 @@ export type GhostPipeFetchResult =
        */
       file: { file_name: string; bytes: number; mime_type: string };
     }
-  | { ok: false; message: string };
+  | { ok: true; status: number; headers: Record<string, string>;
+      library: { path: string; bytes: number; sha256: string; ref: string } }
+  | { ok: false; message: string; errorCode?: string; limitBytes?: number };
 
 /** 工具调用的结构化失败分类(与 cindy-tools 的 CindyGhostCallErrorCode 同构)。 */
 export type GhostToolCallErrorCode =
@@ -9276,3 +9361,9 @@ export function isGhostCallToolName(name: string | undefined | null): boolean {
 export type GhostPipeRoutineRequest =
   | { type: 'routine-request'; action: 'status'; status: 'listening' | 'disconnected' | 'error' }
   | { type: 'routine-request'; action: 'publish'; event: import('@cindy/maker-scheduler').RoutineEvent };
+
+/** A historical unknown declaration is not authorization. */
+export function hasGhostUiPermission(ghost: InstalledGhost): boolean {
+  return ghost.enabled && ghost.approval.state === 'approved' && ghost.uiCapabilityApproved === true
+    && pluginHasToolUi(ghost.manifest);
+}

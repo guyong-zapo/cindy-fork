@@ -51,6 +51,7 @@ import { CHAT_COLOR_TRANSITION_CLASS, CHAT_ICON_BUTTON_CLASS } from './chatChrom
 import { MessageReadAloudContext } from './MessageReadAloudContext';
 import { ChatReplyIcon } from './ChatReplyIcon';
 import { Spinner } from '@/components/ui/spinner';
+import type { ForkAtMessageRunOptions } from './useForkAtMessage';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Tip, Tooltip } from '@/components/ui/tooltip';
 import {
@@ -100,7 +101,7 @@ interface MessageActionBarProps {
    *  loading state alive until resolve/reject. The bar dims to opacity 0.6 +
    *  pointer-events:none for the duration; the Fork icon is replaced with a
    *  spinning Loader2. */
-  onFork?: () => Promise<void>;
+  onFork?: (options?: ForkAtMessageRunOptions) => Promise<void>;
   /** Insert this message's anchored conversation link into the active composer. */
   onAddToChat?: () => void;
   /** 进入「分享为图片」选择模式并预选本条。放在复制按钮右边(产品指定位置)。 */
@@ -187,6 +188,10 @@ export function MessageActionBar({
   const readAloud = useContext(MessageReadAloudContext);
   const [copied, setCopied] = useState(false);
   const [forking, setForking] = useState(false);
+  // 用户确认开启新任务后，到创建结束前提示与操作栏常驻，不随鼠标移开消失；
+  // 确认框打开期间仍按普通 hover 驱动，避免提示压在确认框背后。
+  const [forkConfirmed, setForkConfirmed] = useState(false);
+  const [forkTipHovered, setForkTipHovered] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   // Radix restores focus to the trigger when a menu closes. Programmatic
@@ -263,13 +268,15 @@ export function MessageActionBar({
       if (!onFork || forking) return;
       setForking(true);
       try {
-        await onFork();
+        await onFork({ onConfirmed: () => setForkConfirmed(true) });
       } catch {
         // useForkAtMessage already maps the error to a user-facing toast.
       } finally {
         // Reset regardless of outcome — caller toasts on failure, and on
         // success we usually navigate away anyway so unmount handles it.
         setForking(false);
+        setForkConfirmed(false);
+        setForkTipHovered(false);
       }
     },
     [onFork, forking],
@@ -367,7 +374,7 @@ export function MessageActionBar({
   );
 
   const forkBtn = !simplifiedBotConversation && onFork && (
-    <Tooltip.Root key="fork">
+    <Tooltip.Root key="fork" open={forkConfirmed || forkTipHovered} onOpenChange={setForkTipHovered}>
       <Tooltip.Trigger asChild>
         <button
           type="button"
@@ -838,7 +845,7 @@ export function MessageActionBar({
         // Hover re-enters mid-fade interpolate from the current opacity
         // (browser CSS transition behavior — no replay from 0).
         'transition-opacity duration-[var(--motion-enter)] ease-[var(--motion-ease-out)] motion-reduce:transition-none',
-        simplifiedBotConversation || visible || menuOpen || reactionAction?.open
+        simplifiedBotConversation || visible || menuOpen || forkConfirmed || reactionAction?.open
           ? 'opacity-100'
           : 'opacity-0 pointer-events-none focus-within:opacity-100 focus-within:pointer-events-auto',
         // Menu-owned actions dim the entire bar and block clicks. Fork only
@@ -856,6 +863,7 @@ export function MessageActionBar({
  * outer `side`, level with its top, inside the message row so moving the pointer across the gap keeps
  * the row hovered. It shows while the message (`group/message`) is hovered, while keyboard focus is
  * inside, while `open` (a picker) is set, and always on touch screens. The bubble must be `relative`.
+ * ThreadPanel keeps this same toolbar in flow below the content, without a side gutter.
  */
 export function BubbleHoverToolbar({ side, open = false, besideReactions = false, marker, children }: {
   side: 'left' | 'right'; open?: boolean;
@@ -868,7 +876,7 @@ export function BubbleHoverToolbar({ side, open = false, besideReactions = false
   const left = side === 'left';
   return (
     <div {...{ [SHARE_EXCLUDE_ATTR]: '' }} {...(marker ? { [marker]: '' } : {})} data-open={open ? '' : undefined}
-      className={cn('pointer-events-none absolute top-0 z-10 w-max rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-0.5 opacity-0 transition-opacity duration-[var(--motion-fast)] ease-[var(--motion-ease-out)] focus-within:pointer-events-auto focus-within:opacity-100 group-hover/message:pointer-events-auto group-hover/message:opacity-100 data-[open]:pointer-events-auto data-[open]:opacity-100 motion-reduce:transition-none [@media(hover:none)]:pointer-events-auto [@media(hover:none)]:opacity-100',
+      className={cn('chat-bubble-toolbar pointer-events-none absolute top-0 z-10 w-max rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-0.5 opacity-0 transition-opacity duration-[var(--motion-fast)] ease-[var(--motion-ease-out)] focus-within:pointer-events-auto focus-within:opacity-100 group-hover/message:pointer-events-auto group-hover/message:opacity-100 data-[open]:pointer-events-auto data-[open]:opacity-100 motion-reduce:transition-none [@media(hover:none)]:pointer-events-auto [@media(hover:none)]:opacity-100',
         left ? 'right-full' : 'left-full', besideReactions ? (left ? 'mr-6' : 'ml-6') : (left ? 'mr-1.5' : 'ml-1.5'))}>
       {children}
     </div>

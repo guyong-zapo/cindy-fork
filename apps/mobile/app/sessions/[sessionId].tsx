@@ -1,4 +1,5 @@
 import { snapshotRichAnswerValues } from '@/session/RichAnswer';
+import { PluginUiEnablePrompt } from '@/plugins/PluginUiEnablePrompt';
 import { deviceDisplayName } from '@/device-link/deviceName';
 import { SessionQuickSendProvider } from '@/session/SessionQuickSendContext';
 import { incomingShareSlotOrder } from '@/session/mobileLocalAttachmentUpload';
@@ -30,10 +31,11 @@ import { getActiveMobileSessionRealm } from '@/config/env';
 import { FailedScheduleNotice } from '@/session/FailedScheduleNotice';
 import { shouldShowFailedScheduleNotice, type FailedScheduleRunSnapshot } from '@cindy/maker-shared/schedule-model';
 import type { TokenSpeedSnapshot } from '@cindy/maker-shared/usage-format';
+import { CompanionThreadRoot, useCompanionThreads } from '@/session/CompanionThreads';
 import { CompanionHeader } from '@/session/CompanionHeader';
 import { CloudHomeUnreachableNotice, useSustained } from '@/session/CloudHomeUnreachableNotice';
 import { useCloudCompanionHome } from '@/chat/useCloudCompanion';
-import { CHAT_HEADER_BLUR_FADE_INSIDE } from '@/session/ChatIdentityHeader';
+import { CHAT_HEADER_BLUR_FADE_INSIDE, ChatIdentityHeader } from '@/session/ChatIdentityHeader';
 import { useHiddenHistoryChase } from '@/session/hiddenHistoryChase';
 import { collectCompanionPluginInvocations } from '@/session/pluginInvocations';
 import { COMPANION_STATUS_AVATAR_SIZE, CompanionWorkingStatus, useCompanionDisplayResource, useCompanionWorkingLabel } from '@/session/CompanionWorkingStatus';
@@ -1053,6 +1055,8 @@ function SessionScreenContent({ beforeSessionSwitchRef, newSessionActionRef }: S
     openSearchRequest?: string;
     visualOpenSearch?: string;
     visualSearchQuery?: string;
+    /** Open the teammate's settings on this page (群设置 → 伙伴在本群 → 工具与授权). */
+    companionSettings?: string;
   }>();
   const sessionId = readRouteParam(params.sessionId) ?? '';
   const notificationResponse = readRouteParam(params.notificationResponse);
@@ -6202,6 +6206,14 @@ function SessionScreenContent({ beforeSessionSwitchRef, newSessionActionRef }: S
   const companionDisplay = useCompanionDisplayResource(deviceId, sessionId, companionResource, companionChat);
   const [companionSettingsRequest, setCompanionSettingsRequest] = useState<{ sessionId: string; page: 'memory' | 'capabilities'; sequence: number }>();
   const openCompanionSettings = useCallback((page: 'memory' | 'capabilities') => setCompanionSettingsRequest(previous => ({ sessionId, page, sequence: (previous?.sequence ?? 0) + 1 })), [sessionId]);
+  const routeCompanionSettings = readRouteParam(params.companionSettings);
+  const openedCompanionSettings = useRef('');
+  useEffect(() => {
+    // Once per arrival: the param stays on the route while the user moves on.
+    if (routeCompanionSettings !== 'capabilities' || openedCompanionSettings.current === sessionId) return;
+    openedCompanionSettings.current = sessionId;
+    openCompanionSettings('capabilities');
+  }, [routeCompanionSettings, sessionId, openCompanionSettings]);
   const followUpScope = JSON.stringify([auth.accountGeneration, deviceId, sessionId]);
   const [followUpEngaged, setFollowUpEngaged] = useState<string | null>(null);
   useEffect(() => setFollowUpEngaged(null), [followUpScope]);
@@ -6219,6 +6231,13 @@ function SessionScreenContent({ beforeSessionSwitchRef, newSessionActionRef }: S
     companionName, companionOnline, deviceId]);
   const companionReplyAvatar = useMemo(() => companionChat ? companionPortrait(COMPANION_AVATAR_SIZE) : undefined,
     [companionChat, companionPortrait]);
+  const companionThreadAvatar = useMemo(() => companionPortrait(iconSize.lg), [companionPortrait]);
+  const companionThreads = useCompanionThreads({ deviceId, deviceName, sessionId,
+    botId: companionDisplay?.ref.id ?? '', avatar: companionThreadAvatar,
+    enabled: companionChat && !companionEntry.readOnly && !companionEntry.threadRootSessionId, controlsReady: companionEntry.ready });
+  const companionThreadRoot = companionEntry.threadRootSessionId ? <CompanionThreadRoot
+    deviceId={deviceId} rootSessionId={companionEntry.threadRootSessionId} rootClientId={companionEntry.threadRootClientId}
+    companionName={companionName} enabled={companionEntry.ready} /> : undefined;
   const showCompanionReplyTargets = useCompanionReplyTargetPreference();
   const pendingCompanionReplyQuote = usePendingCompanionReplyQuote(companionChat ? sessionId : null);
   const companionQuoteNames = useMemo(() => ({ owner: t('message.renderer.you'), companion: companionName }), [companionName, t]);
@@ -9842,7 +9861,9 @@ function SessionScreenContent({ beforeSessionSwitchRef, newSessionActionRef }: S
     <Stack.Screen options={{ gestureEnabled: !sessionListDrawerOverlayMounted }} />
     {companionHeaderShown ? <>
       {horizontalSystemHeader ? null : <Stack.Screen options={COMPANION_NATIVE_HEADER_OPTIONS} />}
-      <CompanionHeader key={`${auth.accountGeneration}:${deviceId}:${companionResource.ref.id}`}
+      {companionEntry.threadRootSessionId ? <ChatIdentityHeader nativeHeader={horizontalSystemHeader}
+        testIDPrefix="companion.thread" mark={companionPortrait(32)} title={t('groupChat.thread.title')}
+        subtitle={companionName} identityLabel={t('groupChat.thread.title')} onBack={goBackToHome} /> : <CompanionHeader key={`${auth.accountGeneration}:${deviceId}:${companionResource.ref.id}`}
         nativeHeader={horizontalSystemHeader}
         resource={companionResource} deviceId={deviceId} deviceName={deviceName} online={!remoteUnavailableReason} controlsReady={companionEntry.ready}
         settingsRequest={companionSettingsRequest?.sessionId === sessionId ? companionSettingsRequest : undefined}
@@ -9852,7 +9873,7 @@ function SessionScreenContent({ beforeSessionSwitchRef, newSessionActionRef }: S
         onAskCompanion={askCompanionInComposer}
         askCompanionReady={canUseComposer && composerDraftHydrated}
         onSearch={() => setSearchOpen(true)}
-        onBack={goBackToHome} />
+        onBack={goBackToHome} />}
     </> : <SessionHeaderBar
               horizontalSystemHeader={horizontalSystemHeader}
               systemBarHidden={sessionListDrawerOverlayMounted}
@@ -10468,6 +10489,7 @@ function SessionScreenContent({ beforeSessionSwitchRef, newSessionActionRef }: S
                 <SessionQuickSendProvider value={canUseComposer ? async text => (await send({ independentText: text })) === true : null}>
                 <ChatFilePathContext.Provider value={chatFilePathContextValue}>
                   <MessageRenderer companion={companionChat} companionQuote={companionQuoteOptions}
+                    companionThreads={companionThreads} conversationHeader={companionThreadRoot}
                     onOpenCompanionSettings={openCompanionSettings} onCompanionReadThrough={companionChat ? companionEntry.markReadThrough : undefined} companionWorkingLabel={companionWorkGroupLabel}
                     companionAvatar={companionReplyAvatar}
                     companionPluginInvocations={companionPluginInvocations}
@@ -10485,7 +10507,7 @@ function SessionScreenContent({ beforeSessionSwitchRef, newSessionActionRef }: S
                     busyClientId={messageActionBusy?.clientId ?? null}
                     canLoadEarlier={canLoadEarlierHistory}
                     emptyTestID="session.messageList.empty"
-                    emptyMessage={messageEmptyState.emptyMessage}
+                    emptyMessage={companionEntry.threadRootSessionId ? t('groupChat.thread.empty') : messageEmptyState.emptyMessage}
                     focusedItemKey={focusedMessageItemKey ?? null}
                     focusedRequestKey={focusedMessageRequestKey}
                     followLatestRequestKey={messageListFollowLatestRequestKey}
@@ -10746,6 +10768,8 @@ function SessionScreenContent({ beforeSessionSwitchRef, newSessionActionRef }: S
               <ChevronRight color={colors.textTertiary} size={iconSize.sm} strokeWidth={iconStroke.regular} />
             </Pressable>
           ) : null}
+          <PluginUiEnablePrompt deviceId={deviceId} deviceName={deviceName} sessionId={sessionId}
+            online={!remoteRealtimeControlsUnavailable} active={creationScreenFocused && !shareSelectionActive} />
           {/*
             手机端终结不了的请求(plugin_setup 等)只贴在输入框上方:能看清电脑端
             在等什么、能取消,但不吃掉 composer —— 否则用户既处理不了这张卡又发不
@@ -11972,6 +11996,7 @@ function SessionComposerInput({
   const [composerFocused, setComposerFocused] = useState(false);
   const composerPillOpen = useComposerPillOpen(composerDock.enabled && canUseComposer, () => composerInputRef.current?.focus());
   const [composerInputContentHeight, setComposerInputContentHeight] = useState(COMPOSER_INPUT_SINGLE_LINE_CONTENT_HEIGHT);
+  const [composerAttachmentTrayHeight, setComposerAttachmentTrayHeight] = useState(0);
   const [voiceDraftCaretFrame, setVoiceDraftCaretFrame] = useState({ left: 0, top: 0 });
   const voiceDraftCaretRef = useRef<View>(null);
   const voiceDraftMeasuredBlockRef = useRef<View>(null);
@@ -12097,8 +12122,9 @@ function SessionComposerInput({
     const rowChrome = composerCardActive
       ? COMPOSER_CARD_ROW_CHROME_HEIGHT
       : COMPOSER_INPUT_ROW_CHROME_HEIGHT;
-    return COMPOSER_VERTICAL_PADDING_HEIGHT + statusReserve + rowChrome;
-  }, [composerCardActive, voiceStatusVisible]);
+    // 附件托盘与文字同在卡片里:计入 chrome,文字超出时由输入框自己滚、裁掉上方文字。
+    return COMPOSER_VERTICAL_PADDING_HEIGHT + statusReserve + rowChrome + composerAttachmentTrayHeight;
+  }, [composerAttachmentTrayHeight, composerCardActive, voiceStatusVisible]);
   const composerInputMaxContentHeight = useMemo(() => {
     const availableHeight = nativeShellLayout.composerMaxHeight - composerChromeHeight;
     return Math.min(
@@ -12361,6 +12387,7 @@ function SessionComposerInput({
                     accessibilityLabel={t('session.screen.composerPlaceholder')}
                     accessibilityHint={composerLayout.input.disabledReason ?? undefined}
                     accessoryAbove={controls.attachmentTray}
+                    onAccessoryAboveHeightChange={setComposerAttachmentTrayHeight}
                     autoFocus={visualFocusComposer}
                     cardActive={composerCardActive}
                     caretHidden={voiceIsListening}

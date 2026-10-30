@@ -1,5 +1,25 @@
 {
   "providerAccountUsage": {
+    "kimi": {
+      "refresh": "刷新配额",
+      "usage": "查看 Kimi Code 用量",
+      "error": {
+        "no-credentials": "没有可用的 Kimi Code 凭证，请先连接此供应商。",
+        "auth": "Kimi Code 拒绝了凭证，请检查连接后重试。",
+        "rate-limited": "Kimi Code 限制了配额查询频率，请稍后重试。",
+        "network": "Cindy 无法连接 Kimi Code，请检查网络后重试。",
+        "server": "Kimi Code 暂时无法返回配额，请稍后重试。",
+        "invalid-response": "Kimi Code 返回了无法识别的配额数据，请稍后重试。",
+        "throttled": "刚刚刷新过配额，请稍后重试。",
+        "unknown": "Cindy 无法加载 Kimi Code 配额，请稍后重试。",
+        "updating": "连接已变更，请刷新以获取配额。"
+      },
+      "limit_5h": "5 小时",
+      "limit_7d": "每周",
+      "limit_month_total": "每月总配额",
+      "limit_month_code": "每月编程配额",
+      "stale": "显示上次获取的配额，最新查询未完成"
+    },
     "openDashboard": "打开 DeepSeek 用量页",
     "deepSeek": {
       "balanceLine": "余额 {{total}}（充值 {{toppedUp}} / 赠送 {{granted}}）",
@@ -893,7 +913,10 @@
     }
   },
   "regionScreenshot": {
-    "editor": { "fitWidth": "适合宽度", "loading": "正在加载图片…" },
+    "editor": {
+      "fitWidth": "适合宽度",
+      "loading": "正在加载图片…"
+    },
     "moveToolbar": "左右拖动工具栏",
     "hint": "单击选中窗口或元素，拖动框选 · 滚轮切换范围 · 空格全屏 · C 复制颜色 · Esc 退出",
     "hintWithLast": "单击选中窗口或元素，拖动框选 · 滚轮切换范围 · 空格全屏 · R 上次区域 · C 复制颜色 · Esc 退出",
@@ -1023,7 +1046,7 @@
   },
   "privacyExit": {
     "status": "正在通过 Cindy 被远程控制",
-    "hint": "点击屏幕或按任意键，确认后断开连接",
+    "hint": "要关闭隐私屏，可在远程控制端的「安全」中关闭「电脑防窥」。也可在这台电脑上点击鼠标或按任意键，再选择「断开连接」。",
     "title": "断开远程桌面连接？",
     "detail": "这将结束远程控制并恢复电脑屏幕。如果已开启退出时锁屏，电脑也会锁屏。",
     "cancel": "保持连接",
@@ -1392,6 +1415,8 @@
       "minutes": "{{m}}分"
     },
     "window": {
+      "kimiMonthTotal": "每月总配额",
+      "kimiMonthCode": "每月编程配额",
       "session": "{{hours}} 小时",
       "week": "本周",
       "scoped": "{{model}} 本周"
@@ -2244,7 +2269,7 @@
         "title": "关闭 Cindy",
         "message": "关闭主窗口时要执行什么操作？",
         "detail": "收起到系统托盘后，任务会继续运行；右键托盘图标可以退出。你可以稍后在设置中修改。",
-        "linuxDetail": "最小化窗口后，任务会继续运行；你可以从任务栏或窗口概览恢复 Cindy，也可以稍后在设置中修改。"
+        "linuxDetail": "收起窗口后，任务会继续运行；再次打开 Cindy 即可恢复窗口，也可以稍后在设置中修改。"
       },
       "trayMenu": {
         "show": "打开 Cindy",
@@ -2438,7 +2463,7 @@
         "description": "Ubuntu 使用系统 .deb 安装包。Arch Linux 和 Omarchy 使用受管理的用户目录安装器，复用同一份经过校验的 .deb 内容，无需 Debian 包管理器。",
         "item1": "Ubuntu：使用 sudo apt install ./cindy-<version>-<arch>.deb。Arch/Omarchy：请按 docs/linux.md 中的用户目录安装指南操作。",
         "item2": "点击更新后，系统 .deb 安装需要授权；用户目录安装无需系统密码即可切换版本。其他包管理器安装的版本请通过对应包管理器更新。",
-        "item3": "Linux x64 支持 Beta 渠道，arm64 暂不支持。Linux 仅在你选择重启时应用更新，不会在空闲时自动安装。"
+        "item3": "Linux x64 和 arm64 支持 Beta 渠道。Linux 仅在你选择重启时应用更新，不会在空闲时自动安装。"
       },
       "qnaTitle": "直接提问",
       "qnaDescription": "没找到答案？直接问你想做什么",
@@ -3290,8 +3315,12 @@
         "modelsPending": "{{name}} 已配置，但未能获取模型列表。请在供应商设置中重试。",
         "busyWarning": "此次变更需要重载本机 Codex 服务，可能中断 {{count}} 个正在运行的任务。是否继续？",
         "close": "关闭供应商导入",
-        "loadFailed": "这个供应商导入链接无效或已经过期。",
-        "confirmFailed": "导入失败，请检查链接或接口地址后重试。",
+        "fromFile": "从文件导入",
+        "fileTooLarge": "文件超过 4 MiB，请缩小配置文件后重试。",
+        "fileInvalid": "文件不是有效的供应商导入配置，请检查 JSON 格式和配置字段。",
+        "fileReadFailed": "无法导入文件，请重新选择文件并重试。",
+        "loadFailed": "此供应商导入已失效，请重新打开链接或选择文件。",
+        "confirmFailed": "导入失败，请检查配置或接口地址后重试。",
         "oauthFailed": "供应商已添加，但授权未完成。可以再次尝试授权。",
         "done": "已导入 {{name}}",
         "oauthDone": "已添加并授权 {{name}}",
@@ -3315,6 +3344,47 @@
           "create": "将在本机新建供应商 {{name}}。",
           "update": "将更新已有供应商 {{name}}。",
           "replace-key": "将替换 {{name}} 在本机保存的 API Key。"
+        },
+        "fileGuideDescription": "支持 Cindy 格式的 UTF-8 JSON 文件，最大 4 MiB。",
+        "fileGuideSteps": "按示例填写供应商名称、接口地址、API Key 和模型资料。",
+        "fileGuidePrivacy": "示例不含真实 Key。填写后请妥善保管文件，不要公开分享。",
+        "selectJsonFile": "选择 JSON 文件",
+        "downloadExample": "下载示例",
+        "showFormat": "查看格式说明",
+        "hideFormat": "收起格式说明",
+        "formatStructure": "文件直接包含一个 JSON 对象，不需要 Base64、导入链接或额外包裹层。下面说明自定义 API Key 供应商的格式；字段名区分大小写，JSON 不支持注释。",
+        "formatIdentity": "必填。kind 填 \"custom\"，name 填你希望显示的供应商名称。",
+        "formatAuth": "必填。此示例的 method 填 \"apiKey\"，apiKey 替换为供应商提供的 Key。",
+        "formatEndpoint": "每个接口必填。protocol 支持 \"openai-chat\"、\"openai-responses\"、\"anthropic-messages\" 和 \"google-generative-ai\"。baseUrl 填完整 HTTP(S) 接口地址，建议使用 HTTPS。",
+        "formatTargets": "可选。填写引擎数组：\"claude-code\"、\"codex\" 或 \"pi\"。省略时按协议自动匹配；也可显式指定，Claude Code 同样支持 OpenAI 和 Google 协议。示例仅启用 Pi。",
+        "formatModels": "可选。填写模型 ID 字符串，或含 id 的对象（name 可选）。省略或空数组时，确认后自动获取；非空清单不会再自动获取。",
+        "formatMetadata": "模型对象的可选字段：group 为分组，contextWindow 为上下文长度，maxOutputTokens 为输出上限（后两项单位均为 token）。示例数值仅作演示，请按模型实际能力填写。",
+        "formatEffort": "模型对象的可选字段：efforts 为支持的推理强度数组，defaultEffort 为其中一个默认值。不确定时可删除这两个字段。",
+        "formatLimits": "每个供应商最多 8 个接口，每个接口最多 10,000 个模型，同时受 4 MiB 文件大小限制。",
+        "exampleTitle": "JSON 示例（与下载内容一致）",
+        "fileGuidePrepare": "准备配置文件",
+        "fileGuideReview": "预览并确认",
+        "fileGuideReviewHint": "支持单个或多个供应商。选择文件后先核对配置，确认导入后才会保存。",
+        "formatConversion": "其他客户端导出的配置需先转换为此格式。",
+        "downloadBatchExample": "下载批量示例",
+        "formatBatch": "批量文件使用 { \"providers\": [{}, {}] }，每项沿用下述单供应商结构。最多 50 项，整个文件不超过 4 MiB；内置供应商槽位和显式 id 不可重复。任一项结构不合法时，整个文件不会创建导入草稿。",
+        "batchTitle": "批量导入供应商（{{count}}）",
+        "batchNote": "勾选后批量导入；单独确认可选择更新已有连接或完成授权。已导入项会保留，失败项不影响其他项。",
+        "batchImport": "导入所选（{{count}}）",
+        "batchProgress": "已添加或更新 {{count}} / {{total}} 项",
+        "batchItem": "配置 {{index}}",
+        "batchReviewOne": "单独确认",
+        "batchStatus": {
+          "loading": "正在读取预览…",
+          "ready": "待导入",
+          "saving": "正在导入…",
+          "saved": "已导入",
+          "modelsPending": "已导入，请在供应商设置中重试获取模型",
+          "failed": "导入失败，可重试或单独确认",
+          "manual": "需要单独确认或授权",
+          "invalid": "无法预览此配置，请检查配置或重新选择文件",
+          "skipped": "已跳过；再次导入需重新选择文件",
+          "authorizationPending": "连接已添加，请在供应商设置中完成授权"
         }
       },
       "order": {
@@ -3773,7 +3843,7 @@
           "contextLimitOverWindow": "已超过上游声明的长度，可能导致请求失败。",
           "restoreDefault": "恢复默认",
           "engines": "引擎支持",
-          "enginesHint": "兼容模式需要转换请求，默认关闭，可按需开启。",
+          "enginesHint": "兼容模式由 Cindy 在本地转换请求，默认关闭，可按需开启。",
           "engineUnsupported": "不支持",
           "engineNotConfigured": "尚未配置",
           "engineNoFast": "无 Fast",
@@ -3812,10 +3882,10 @@
           "protocol": {
             "reference": "原生协议",
             "compatibility": "兼容模式",
-            "compatibilityHint": "兼容模式可能出现运行不稳定或功能异常，建议有经验的用户使用。",
-            "matching": "原生支持",
+            "compatibilityHint": "由 Cindy 在本地转换请求格式，可能出现运行不稳定或功能异常，建议有经验的用户使用。",
             "unknown": "协议待确认",
-            "automatic": "自动选择"
+            "automatic": "自动选择",
+            "upstream": "上游接口"
           },
           "lifecycle": {
             "alpha": "试用版",
@@ -7372,9 +7442,11 @@
         "agentBackgroundDetail": "不需要当次点击，但只能使用你曾为这个插件建立过关联的任务，可能产生模型费用。",
         "agentTasksRequest": "确认任务权限",
         "agentTasks": "可创建和管理本插件的 Cindy 任务",
-        "agentTasksDetail": "可发送消息、读取结果和停止本插件的执行，任务对你可见。沿用插件的 AI 配置，可能产生模型费用；不授予其他任务的访问权。",
+        "agentTasksDetail": "插件可向自身创建的任务发送消息、读取结果并停止执行。任务对你可见，沿用插件的 AI 配置，可能产生模型费用。任务中的 Agent 可按任务权限和账号归属使用已连接工具，包括访问其他任务和账号数据。",
+        "agentDelegation": "可委派任务给伙伴",
+        "agentDelegationDetail": "伙伴按委派范围执行并接受自动审核；不冒用主人身份，不修改伙伴权限。",
         "agentTargets": "可向项目、已有任务和伙伴投递消息",
-        "agentTargetsDetail": "可查看本机项目目录、任务和伙伴的名称与标识，在项目中新建任务或向已有任务、伙伴发送文字和图片。可能触发 AI 执行并产生模型费用；不授予其他任务的历史读取、设置修改或停止权限。",
+        "agentTargetsDetail": "可查看本机项目目录、任务和伙伴的名称与标识，在项目中新建任务或向已有任务、伙伴发送文字和图片。可能触发 AI 执行并产生模型费用。该投递接口本身不能读取其他任务的历史、修改设置或停止任务。",
         "agentHiddenTasks": "可创建不显示在任务列表里的后台任务",
         "agentHiddenTasksDetail": "本插件创建的任务可以不出现在任务列表、搜索和通知里。你可以随时在插件详情的「后台任务」中查看、打开，或显示到任务列表；卸载插件时这些任务会恢复显示。",
         "agentErrand": "可以新建任务、执行工作并读取结果",
@@ -7442,8 +7514,8 @@
         "updated": "更新",
         "unchanged": "其余 {{count}} 项权限不变",
         "noChange": "权限无变化。",
-        "pick": "可请求你选择一个文件夹交给它",
-        "pickDetail": "它发起请求时，Cindy 会弹出系统的选择文件夹窗口；选哪个、给不给，都由你亲手决定，取消则它什么都拿不到。",
+        "pick": "可请求你选择文件或文件夹交给它",
+        "pickDetail": "它发起请求时，Cindy 会弹出系统选择窗口；选哪个、给不给，都由你亲手决定，取消则它什么都拿不到。",
         "workspace": "可请求为项目文件夹在侧边栏创建任务入口",
         "workspaceDetail": "它发起请求时，由你亲手选择文件夹，或在确认卡上看到完整路径后再决定；它正在处理你发起的调用时，当前任务工作目录内的子文件夹可直接使用，不再单独确认。文件夹已有任务时直接复用，不重复创建。创建的只是空任务，不会自动开始运行。",
         "sessionContext": "可获知当前任务正在使用的项目文件夹位置",
@@ -7457,7 +7529,11 @@
         "nodeChildSpawnDetail": "只能启动它自己包里申报过的 JS 文件(与主程序同样的本机权限)，不能执行任意命令；插件停用或退出时子进程一并关闭。",
         "skill": "为 AI 助手添加技能「{{name}}」",
         "skillDetail": "技能是一份指令文件，AI 会把它当作自己的指令加载执行，拥有你的全部权限，对 Claude Code 与 Codex、所有项目都生效——不受本插件沙箱约束。插件启用期间持续可用，停用或卸载即移除；仅对某个文件夹关闭本插件不会隐藏它。此处无法预览技能全文——请只安装你信任的插件。",
-        "routineEvents": "例行任务事件"
+        "routineEvents": "例行任务事件",
+        "mcpUi": "可在对话中显示交互页面",
+        "mcpUiDomains": "页面可连接域名：{{domains}}",
+        "mcpAppOnly": "仅页面可用",
+        "uiPageAccess": "页面：{{pages}}；域名：{{domains}}；页面可调用的工具：{{tools}}"
       },
       "connections": {
         "confirmTitle": "添加连接地址",
@@ -8016,7 +8092,6 @@
         "versionContent": "版本内容",
         "loadMoreVersions": "加载更多版本",
         "notSubmitted": "尚未提审",
-        "submitVersion": "提交 {{version}} 审核",
         "publishingVersion": "本次提审 · {{version}}",
         "refreshSummary": "刷新发布摘要",
         "versionConsumedHint": "提审成功受理后，此版本号不能再次使用；取消或退回后也需要更改版本号。",
@@ -8031,6 +8106,14 @@
         "viewPendingVersion": "查看正在审核的版本",
         "submitFailed": "提交失败",
         "viewDetails": "查看详情"
+      },
+      "fileTransfer": {
+        "reading": "正在读取文件",
+        "uploading": "正在上传",
+        "saving": "正在保存文件",
+        "importing": "正在导入文件",
+        "finished": "文件处理结束",
+        "importFinished": "文件导入结束"
       }
     },
     "mcp": {
@@ -10196,6 +10279,7 @@
       "backToBot": "回到 {{name}}"
     },
     "collab": {
+      "deliveryFailed": "结果未能送达原对话，已保存在本任务中",
       "backgroundTask": "后台任务",
       "trackedTask": "独立运行并自动回传结果",
       "stopTask": "停止任务",
@@ -10330,7 +10414,9 @@
         "digestSent": "已发到伙伴私聊",
         "digestFailed": "整理失败，请重试",
         "digestEmpty": "暂无新的待整理内容",
-        "joinSetup": "入群后设置 AI 代答模式"
+        "joinSetup": "入群后设置 AI 代答模式",
+        "hours": "代答时段",
+        "ownerOnly": "只有你自己能看到和修改这里的设置。"
       },
       "migrationPending": "部分旧记录尚未上传完成，将自动重试。当前群聊可继续使用。",
       "memberSeparator": "、",
@@ -10527,8 +10613,6 @@
         "projectDirChange": "更换",
         "projectDirClear": "清除",
         "projectDirNote": "分工做事时，伙伴们在这里干活。不选也行，会用这个群自己的文件夹；选了 git 项目，每次分工会新开一个 worktree 和分支，不动你手上的代码。",
-        "handoff": "分工交接",
-        "autoContinueNote": "开着时，你在这个群发起的分工做完一步就自动交给下一位；关着时每一步都等你点「继续」。只在这台电脑上生效。",
         "autoContinueSaveFailed": "分工交接没能保存，请再试一次",
         "projectDirSaveFailed": "项目文件夹没能保存，确认文件夹还在后再试"
       },
@@ -10724,12 +10808,7 @@
           "member": "成员",
           "guest": "访客",
           "companionOf": "{{name}} 的伙伴",
-          "guestAccess": "其他成员使用权限",
           "toolsHint": "本群成员可以使用伙伴已有的工具与私人资料，结果对全群可见。原有操作审批仍有效；撤回会停止进行中的请求，已执行的操作无法撤销。",
-          "chatHint": "默认只使用群内消息，不读取主人记忆、私人资料或调用工具。",
-          "none": "仅主人可使用",
-          "chat": "仅群内交流",
-          "tools": "主人已授权工具与资料",
           "ownerOnly": "只有伙伴的主人可以修改此授权。",
           "authorizeTitle": "授权本群使用 {{name}} 的工具与资料？",
           "makeAdmin": "设为管理员",
@@ -10739,7 +10818,6 @@
           "transferHint": "对方成为群主，你将成为管理员。",
           "removeTitle": "将 {{name}} 移出群？",
           "removeHint": "该成员将无法继续查看或发消息；如果是伙伴的主人，其伙伴也会退出。",
-          "addCompanion": "邀请我的伙伴",
           "leave": "退出群",
           "leaveHint": "你和你的伙伴将退出此群聊，不再接收新消息，也无法查看群历史。",
           "soleOwnerHint": "群里只剩你。可以归档群，保留历史记录，以后再恢复使用。",
@@ -10751,10 +10829,78 @@
           "unarchive": "取消归档",
           "unarchiveHint": "取消归档后，本群对所有成员恢复新消息和伙伴执行。",
           "archived": "本群已归档，可继续查看历史记录。",
-          "noneHint": "本群只有伙伴的主人可以让伙伴回应。",
-          "companionPermissions": "伙伴权限",
-          "configureCapabilities": "工具与授权设置",
-          "capabilityScope": "这是 {{name}} 自己的工具与授权，不是仅限本群的设置。"
+          "capabilityScope": "这是 {{name}} 自己的工具与授权，不是仅限本群的设置。",
+          "tabSettings": "群设置",
+          "youAreOwner": "你是群主",
+          "youAreAdmin": "你是管理员",
+          "inviteEntry": "邀请",
+          "inviteFriendsItem": "邀请朋友",
+          "inviteFriendsItemHint": "生成链接，发给朋友",
+          "inviteFriendsLocked": "只有群主和管理员可以邀请朋友",
+          "inviteBotsItem": "邀请伙伴",
+          "inviteBotsItemHint": "点选你的伙伴，直接加入",
+          "searchTeammates": "搜索伙伴",
+          "inviteBotsCount": "共 {{count}} 位可加入",
+          "inviteBotsAllIn": "你的伙伴都已经在群里了",
+          "inviteBotsNoMatch": "没有找到「{{query}}」",
+          "inviteBotsAdded": "已把 {{name}} 加入群聊",
+          "noTeammates": "你还没有伙伴",
+          "createTeammate": "创建伙伴",
+          "back": "返回群设置",
+          "about": "群介绍",
+          "edit": "编辑",
+          "add": "添加",
+          "aboutEmpty": "添加群主题和简介，新成员一进来就知道这里聊什么。",
+          "showMore": "展开",
+          "showLess": "收起",
+          "you": "你",
+          "searchMembers": "搜索成员",
+          "membersNoMatch": "没有找到「{{query}}」",
+          "teammateTag": "伙伴",
+          "paused": "已暂停",
+          "accessNone": "仅主人可用",
+          "accessChat": "仅群内交流",
+          "accessTools": "可用工具与资料",
+          "replies": "伙伴怎么接话",
+          "replyModeMentionedNote": "不 @ 人时，伙伴不会接话。",
+          "work": "分工",
+          "ownFolder": "群自己的文件夹",
+          "projectDirHint": "分工时，伙伴们在这里干活。",
+          "projectDirClearHint": "改用群自己的文件夹",
+          "organizerHint": "安排谁做哪一步；默认是第一位伙伴。",
+          "autoContinueHint": "关闭时，每一步都等你点「继续」。",
+          "workCaption": "选了 git 项目时，每次分工都会新开分支，不动你手上的代码。项目文件夹和自动交接只在这台电脑上生效。",
+          "me": "我在本群",
+          "profileHint": "本群昵称和头像，只在这个群显示",
+          "maskHint": "有人 @ 你时，由你的伙伴代你回复",
+          "myTeammates": "我的伙伴",
+          "myTeammatesCaption": "决定群里其他人能怎样使用你的伙伴。",
+          "manage": "群管理",
+          "manageHintOwner": "接话方式、负责人、分工、归档与解散",
+          "manageHintAdmin": "接话方式、负责人、分工、归档",
+          "manageCaption": "这一页只有群主和管理员能看到。",
+          "hideHint": "不退群，只是不在你的列表里显示",
+          "leaveRowHint": "你的伙伴会和你一起退出",
+          "leaveRowHintAlone": "退出后不再收到新消息，也看不到群历史",
+          "leaveBlocked": "先把群主转让给别人，才能退出",
+          "archiveRowHint": "全群停用，历史保留，以后可以恢复",
+          "unarchiveRowHint": "恢复新消息和伙伴干活",
+          "dissolveRowHint": "不可恢复，所有人都不能再发消息",
+          "editTitle": "编辑群资料",
+          "topicHint": "显示在群介绍的第一行",
+          "descriptionHint": "伙伴每次回复都会参考最新的群简介。",
+          "companionTitle": "{{name}} 在本群",
+          "yourTeammate": "你的伙伴",
+          "accessQuestion": "群里其他人可以怎样使用 {{name}}？",
+          "defaultTag": "默认",
+          "accessNoneTitle": "只有你能用",
+          "accessNoneHint": "群里只有你能让 {{name}} 回应。",
+          "accessChatTitle": "只在群里交流",
+          "accessChatHint": "只根据群里的消息回答，不读你的记忆和私人资料，也不调用工具。",
+          "accessToolsTitle": "可以用工具和资料",
+          "accessToolsHint": "可以使用 {{name}} 已有的工具和你的私人资料，结果全群可见。原有的操作审批照常；撤回后，已经做完的操作不能撤销。",
+          "capabilitiesRow": "{{name}} 的工具与授权",
+          "accessMenu": "在本群的权限"
         }
       },
       "lifecycle": {
@@ -11639,6 +11785,7 @@
         "cancelled": "已取消"
       },
       "timeout": "等待超时",
+      "cancelled": "用户取消了插件设置，本次调用未执行。",
       "oauthCancelled": "授权已取消",
       "oauthFailed": "授权失败：{{detail}}",
       "pluginUninstalledDuringOauth": "目标插件已卸载或不可用",
@@ -12341,6 +12488,13 @@
         "busy": "仓库正忙，请稍后重试",
         "changed": "检出的分支已变化，请重试"
       }
+    },
+    "pluginUi": {
+      "title": "插件「{{name}}」新增了交互页面，需要你确认后才能使用",
+      "enable": "查看并启用",
+      "later": "以后再说",
+      "ready": "交互页面已启用。下次调用插件工具时即可显示。",
+      "updateHost": "请先更新执行电脑上的 Cindy，才能在这里确认交互页面。"
     }
   },
   "onboarding": {
@@ -12711,6 +12865,7 @@
       "piTransportClosed": "远端 Pi 连接已中断（SSH 通道关闭）。远端任务仍在运行，重新连接后可以继续。",
       "piManagerUnavailable": "远端 Pi 管理器未就绪，请稍后重试；若持续失败请到「设置 → 远端机器」重新安装 Pi。",
       "piBundledNodeMissing": "远端缺少运行环境（Node.js）。请到「设置 → 远端机器」展开该主机，先在 Claude Code 或 Codex 行点击「安装」（会附带 Node.js），再创建 Pi 任务。",
+      "remoteCompactEncryptedContent": "整理上下文失败：模型无法读取历史中的加密内容。自动接续未完成，可重试恢复。",
       "contextOverflow": "这条消息本身已经超过模型上下文上限，没法在当前 Agent 里自动换窗继续。请缩短输入或去掉超大附件后再试。",
       "attachmentAccessDeniedTitle": "Cindy 无法读取源附件，消息未发送。",
       "attachmentAccessDeniedRecovery": "请将文件另存到“下载”或其他可访问的文件夹，移除原附件，再用附件按钮添加副本后发送。"
@@ -13769,6 +13924,20 @@
       }
     },
     "draft": {
+      "directoryRecovery": {
+        "required": "部分关联目录需要重新授权，请依次重新选择全部 {{count}} 个关联目录",
+        "changed": "关联目录已变化，请检查后重新选择全部 {{count}} 个关联目录",
+        "unavailable": "关联目录无法访问，请检查目录或系统权限，也可返回编辑后移除该目录",
+        "selecting": "正在重新选择目录 {{index}}/{{count}}：{{directory}}",
+        "cancelled": "已取消重新选择，提示词和关联目录已保留",
+        "mismatch": "所选目录与原目录不同，原目录列表未更改",
+        "failed": "未能完成目录重新选择，提示词和关联目录已保留",
+        "ready": "目录已重新选择，请再次发送任务",
+        "readyGoal": "目录已重新选择，请再次创建目标",
+        "reselect": "重新选择目录",
+        "cancel": "取消重新选择",
+        "edit": "返回编辑"
+      },
       "createSessionFailed": "创建任务失败，请重试",
       "piRemoteUnsupported": "Pi 仅在本地运行，无法使用 SSH 远程主机。请切换到 Claude 或 Codex 来使用该主机。",
       "localWorktreeCleanupPending": "上一次本地 worktree 任务仍待回收，请等待清理完成后再试。",
@@ -15449,6 +15618,7 @@
       "embedded-frame": "输入框位于嵌入的其他网站中，请确认来源可信。"
     },
     "agentControlled": "这个界面由 Agent 打开。填写前请确认它确实是你要登录的地方。",
+    "agentPicture": "这张二维码来自 Agent 的截图，Cindy 看不到原来的画面，扫完也不会自动继续。请确认它指向的网站是你要登录的地方，扫完点「交还给 Agent」。",
     "error": {
       "decision": "操作没有送达，请重试。",
       "stale": "界面已经变化，请按最新内容操作。",
@@ -17153,6 +17323,18 @@
     "compression": "用于精简冗长内容。"
   },
   "routines": {
+    "deliveryLabel": "最终送达",
+    "deliveryDirect": "直接显示在伙伴对话里",
+    "deliveryProcess": "交给伙伴处理后回复",
+    "deliveryIm": "发送到消息机器人",
+    "deliveryNone": "只保留在执行任务里",
+    "deliveryHint": "默认直接显示结果，不额外调用模型。开启静默检查后，无事时不送达。",
+    "deliveryRecipient": "接收位置",
+    "deliveryUnavailable": "当前接收位置不可用",
+    "deliveryNoRecipients": "请先连接消息机器人，并与它聊过一次，再重新打开此设置。",
+    "deliveryFailed": "已完成，送达失败",
+    "deliveryFailedHint": "执行结果已保留。请检查送达设置；不要为了补发而重新执行任务。",
+    "deliveryDelivered": "结果已送达",
     "onEvent": "事件：{{source}} · {{event}}",
     "triggerDetails": "查看触发条件（{{count}} 项，满足任一项即运行）",
     "noTriggers": "尚未设置触发条件",
@@ -18300,7 +18482,18 @@
     "cardTitle": "{{title}} · $t(mcpApps.appName)",
     "messageSource": "由 $t(mcpApps.appName)「{{name}}」发送",
     "serverId": "MCP 服务器 ID：{{id}}",
-    "exitFullscreen": "退出全屏"
+    "exitFullscreen": "退出全屏",
+    "pluginTrust": {
+      "unverified": "未验证",
+      "cindy-official": "Cindy 官方",
+      "reviewed": "已审核",
+      "verified-publisher": "发布者已验证"
+    },
+    "pluginRevoked": "插件已停用或发生变化，此页面已失效",
+    "pluginCspRejected": "页面申请了未声明的域名，已拒绝加载",
+    "filesOnExecutionComputer": "文件内容请在执行电脑查看",
+    "awaitingApproval": "等待你确认",
+    "pendingApprovals": "{{count}} 个待确认"
   },
   "richAnswer": {
     "send": "发送消息",
@@ -18372,9 +18565,29 @@
     "pending": "部分电脑尚未确认设置。请保持连接，并更新不支持此设置的组内电脑。",
     "saveFailed": "设置可能已保存，但运行中的任务尚未全部确认切换为普通模式。请检查连接后重试。"
   },
-  "attachmentAccessConfirmation": {
-    "title": "确认附件访问",
-    "message": "Cindy 无法读取这个附件。请选择原文件，确认后继续发送这条消息；取消会保留草稿。",
-    "button": "使用原文件"
+  "performanceTrace": {
+    "title": "性能跟踪",
+    "start": "开始录制",
+    "stop": "停止录制",
+    "description": "开始后重复出现卡顿的操作，再停止录制。60 秒后自动结束。本地轨迹可能包含路径等敏感信息。",
+    "localScope": "仅记录当前电脑，不包含其他电脑和手机。",
+    "recording": "正在录制 · {{seconds}} 秒",
+    "saving": "正在保存录制…",
+    "result": "性能报告",
+    "previous": "查看上次报告",
+    "previousResult": "上次性能报告",
+    "previousSummary": "上次录制：{{time}}，共 {{seconds}} 秒。",
+    "resultDescription": "提交完整的性能报告、CPU 采样文件、Chromium 轨迹和填写的说明，用于排查卡顿。上传前会抹除可识别的凭证、邮箱等敏感信息，文件仍可能包含本地路径和性能标记。本地原始文件保留 7 天。",
+    "summary": "已录制 {{seconds}} 秒。",
+    "partial": "部分数据未能采集或已达到上限，现有记录已保留。",
+    "note": "当时在做什么？（选填）",
+    "submit": "提交报告",
+    "keepLocal": "查看本地文件",
+    "close": "关闭",
+    "new": "重新录制",
+    "uploaded": "性能报告文件已上传。报告编号：{{id}}。反馈问题时请附上此编号。",
+    "unavailable": "当前版本未配置报告上传地址。可打开本地文件，交给支持人员。",
+    "consent": "请先在设置中同意隐私政策，再提交报告。本地文件已保留。",
+    "failed": "操作未完成，请重试或查看本地文件。"
   }
 }

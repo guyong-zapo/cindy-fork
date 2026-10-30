@@ -31,8 +31,12 @@ export default {
   viewport: { width: 1280, height: 800 },
   real: 'BotGroupChatView (timeline, composer, send button, header registration), ControlledBanner, ContentHeader shell, Markdown, theme, fonts and translations',
   notCovered:
-    'Sending, round control, real device-link control and revocation, pending interactions, plans and attachments; the bubbles case shows a task snapshot, not a live task; the sidebar is an empty frame',
+    'Real IPC/network sending (send-status controls host receipts), round control, real device-link control and revocation, answering pending interactions, plans and attachments; the bubbles case shows a task snapshot, not a live task; the sidebar is an empty frame',
   cases: {
+    'send-status': {
+      about: 'Mac send flicker regression: real composer/outbox/timeline, controlled slow receipt; row geometry stays stable and failed sends remain retryable',
+      data: { ...base, messages: 40, sendStatus: true },
+    },
     'remote-limits': {
       about: '#6835: lane-unavailable notices show device and total task limits with recovery advice',
       viewport: { width: 720, height: 700 },
@@ -42,6 +46,7 @@ export default {
     'work-tools': { about: 'Actual group work status, scenario data: command execution', data: { ...base, messages: 2, workState: 'testing' } },
     'work-reading': { about: 'Actual group work status, scenario data: file reading', data: { ...base, messages: 2, workState: 'reading-file' } },
     'work-waiting': { about: 'Actual group work status, scenario data: needs confirmation', data: { ...base, messages: 2, workState: 'waiting' } },
+    'work-waiting-no-start': { about: '#7583: waiting without a card or start time keeps the original task entry and shows no invented elapsed time', data: { ...base, messages: 2, workState: 'waiting', workNoStart: true } },
     'work-stopping': { about: 'Actual group work status, scenario data: stop requested', data: { ...base, messages: 2, workState: 'stopping' } },
     'work-unknown': { about: 'Remote work with no readable task: generic activity, no invented thinking', data: { ...base, messages: 2, workState: 'unknown' } },
     'work-remote': { about: 'Authenticated remote target projection, scenario data (not a live device-link run)', data: { ...base, messages: 2, workState: 'testing', workRemote: true } },
@@ -127,6 +132,50 @@ export default {
   },
   async check(page, ui) {
     const definition = this.cases[ui.case];
+    if (ui.case === 'send-status') {
+      // Renderer integration: jsdom's send tests cannot measure the 600ms layout jump.
+      const input = page.locator('textarea');
+      const outbox = page.getByTestId('bot-group-outbox');
+      const content = 'A message awaiting its receipt';
+      const row = page.locator('[data-bot-group-message-id]').filter({ hasText: content });
+      const geometry = () => row.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        const scroller = document.querySelector('[data-testid="bot-group-timeline"]');
+        return { x: rect.x, y: rect.y, width: rect.width, height: rect.height, scrollTop: scroller.scrollTop };
+      });
+      const receipt = (result) => page.evaluate((detail) => window.dispatchEvent(new CustomEvent('fixture-send-receipt', { detail })), result);
+      await input.fill(content);
+      await input.press('Enter');
+      await outbox.waitFor();
+      const pending = await geometry();
+      await ui.capture('pending');
+      await outbox.getByRole('status').waitFor({ state: 'attached' });
+      const slow = await geometry();
+      await ui.capture('slow');
+      await receipt('ok');
+      await outbox.waitFor({ state: 'detached' });
+      const sent = await geometry();
+      await ui.capture('sent');
+      console.log('SEND_STATUS_GEOMETRY', JSON.stringify({ pending, slow, sent }));
+      assert.deepEqual(slow, pending, 'slow-send feedback must not move the row or scroll position');
+      assert.deepEqual(sent, pending, 'receipt must not move the row or scroll position');
+      assert.equal(await row.count(), 1, 'receipt preserves one message');
+
+      await input.fill('Failure remains actionable');
+      await input.press('Enter');
+      await outbox.waitFor();
+      await input.fill('Keep this new draft');
+      await receipt('failed');
+      await outbox.getByRole('alert').waitFor();
+      await ui.capture('failed');
+      assert.equal(await outbox.getByRole('button', { name: await ui.t('bots.groupChat.outbox.edit'), exact: true }).isEnabled(), true);
+      await outbox.getByRole('button', { name: await ui.t('bots.retry'), exact: true }).click();
+      await outbox.getByRole('alert').waitFor({ state: 'detached' });
+      await receipt('ok');
+      await outbox.waitFor({ state: 'detached' });
+      assert.equal(await input.inputValue(), 'Keep this new draft');
+      return;
+    }
     if (ui.case === 'remote-limits') {
       const timeline = page.getByTestId('bot-group-timeline');
       for (const [i, code] of ['REMOTE_DEVICE_LIMIT', 'REMOTE_TOTAL_LIMIT'].entries()) {
@@ -137,12 +186,19 @@ export default {
     }
     if (definition.data.workState) {
       const state = definition.data.workState;
-      await ui.emit('sessionActivity', [{ sessionId: 'fixture-work', phase: 'running',
+      await ui.emit('sessionActivity', [{ sessionId: 'fixture-work', phase: definition.data.workNoStart ? 'needs-interaction' : 'running',
         workingPhase: ['thinking', 'reading-file', 'testing'].includes(state) ? state : 'processing',
         compactDetail: state === 'testing' ? '检查私聊与群聊的回归结果' : state === 'reading-file' ? '核对群聊状态与任务入口' : '',
-        startedAtMs: Date.now() - 83_000, lastActivityAtMs: Date.now(), attention: false,
+        startedAtMs: definition.data.workNoStart ? null : Date.now() - 83_000, lastActivityAtMs: Date.now(), attention: false,
         gracefulStopState: state === 'stopping' ? 'requested' : 'none', source: 'live' }]);
       await page.getByTestId('bot-group-progress').first().waitFor();
+      if (definition.data.workNoStart) {
+        const strip = page.getByTestId('bot-group-progress');
+        const elapsed = (await ui.t('bots.groupChat.progress.elapsed')).split('{{')[0];
+        assert.ok(!(await strip.innerText()).includes(elapsed), 'unknown start time must not display elapsed time');
+        const timeline = page.getByTestId('bot-group-timeline');
+        await timeline.getByRole('button', { name: await ui.t('bots.groupChat.progress.viewProcess'), exact: true }).last().waitFor();
+      }
       if (ui.case === 'work-parallel-stopping') {
         const stop = page.getByRole('button', { name: await ui.t('bots.groupChat.progress.stop'), exact: true });
         assert.equal(await stop.count(), 1);
@@ -195,15 +251,16 @@ export default {
 
     if (ui.case === 'settings') {
       const drawer = page.getByRole('dialog');
-      await drawer.getByText(await ui.t('bots.groupChat.server.settings.name'), { exact: true }).waitFor();
+      // Group-wide defaults live in 群管理, which owners and admins open from the settings tab.
+      await drawer.getByRole('button', { name: new RegExp(`^${await ui.t('bots.groupChat.server.settings.manage')}`) }).click();
       const replyMode = drawer.getByRole('combobox', { name: await ui.t('bots.groupChat.settings.replyMode'), exact: true });
-      await replyMode.click();
-      await page.getByRole('option', { name: await ui.t('bots.groupChat.settings.replyModeMentioned'), exact: true }).click();
-      assert.equal(await replyMode.innerText(), await ui.t('bots.groupChat.settings.replyModeMentioned'));
+      await replyMode.waitFor();
+      assert.equal(await replyMode.innerText(), await ui.t('bots.groupChat.settings.replyModeAll'));
       // Reply mode and the 分工 settings stay; one teammate at a time leaves no speaking mode (bot-group-chat.md §4.0).
       assert.equal(await drawer.getByText(await ui.t('bots.groupChat.settings.speakingMode'), { exact: true }).count(), 0, 'speakingMode');
-      for (const key of ['bots.groupChat.organizer', 'bots.groupChat.settings.projectDir', 'bots.groupChat.settings.handoff'])
+      for (const key of ['bots.groupChat.organizer', 'bots.groupChat.settings.projectDir', 'bots.groupChat.plan.autoContinue'])
         assert.ok(await drawer.getByText(await ui.t(key), { exact: true }).count() > 0, key);
+      await ui.capture('manage');
       return;
     }
     if (ui.case === 'division-waiting' || ui.case === 'division-auto') {

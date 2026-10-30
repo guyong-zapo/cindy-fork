@@ -303,6 +303,10 @@ export interface BotGroupThreadShareView {
   attachments: BotGroupAttachment[];
   createdAt: number | null;
   edited: boolean;
+  /** The same thread summary shown under a thread root in the main timeline. */
+  replyCount?: number;
+  threadPreview?: BotGroupThreadPreview;
+  threadUnread?: BotGroupThreadUnread;
   /** Cache version this view was checked at; compare with `BotGroupDetail.threadShareVersion`. */
   version?: number;
 }
@@ -858,8 +862,8 @@ export interface ChatServerApi {
   mask?(input: { groupId: string; action?: ChatMaskAction; operationId?: string }): Promise<ChatServerResult<{ state: ChatMaskState }>>;
   mentions?(input: { groupId: string; before?: string; readIds?: string[]; operationId?: string }): Promise<ChatServerResult<{ mentions: ChatMaskMention[]; hasMore: boolean }>>;
   manage(input: { groupId: string; action: ChatGroupAction }): Promise<ChatServerResult<{ listState?: { conversationId: string; hidden: boolean; revision: number } }>>;
-  /** `botId` is the local teammate id behind each Chat Server actor. */
-  ownedBots(): Promise<ChatServerResult<{ bots: Array<{ actorId: string; botId?: string; name: string }> }>>;
+  /** Owned companions across devices. `botId` is the stable external id, not a local-install guarantee. */
+  ownedBots(): Promise<ChatServerResult<{ bots: Array<{ actorId: string; botId?: string; name: string; avatar?: string | null; homeDeviceId?: string | null }> }>>;
   refreshProfile(): Promise<ChatServerResult<Record<never, never>>>;
   status(): Promise<{ enabled: boolean; connected: boolean; personalMask?: boolean }>;
   /**

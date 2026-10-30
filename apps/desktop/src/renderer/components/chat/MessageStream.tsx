@@ -442,6 +442,8 @@ import { hasReviewableTurnChanges, type TurnChangeSetSummary } from '../../../sh
 interface MessageStreamProps {
   /** Content before history, sharing its scrolling and measured content height. */
   header?: ReactNode;
+  /** Host forms share the measured scroll area, outside message virtualization. */
+  footer?: ReactNode;
   historyVisibleAfter?: number;
   onAskInSideChat?: (quote: string) => Promise<boolean>;
   /** Active session id — used to reset scroll state on session switch. */
@@ -2994,6 +2996,7 @@ export const WorkGroupRenderItemView = memo(function WorkGroupRenderItemView({
 
 export function MessageStream({
   header,
+  footer,
   onAskInSideChat,
   historyVisibleAfter,
   sessionId,
@@ -6823,6 +6826,7 @@ export function MessageStream({
                     );
                   })}
                 </div>}</MessageViewport>
+                {footer ? <div className="mt-3.5" data-message-stream-footer>{footer}</div> : null}
               </div>
             </div>
 
@@ -7066,6 +7070,7 @@ const MessageItem = memo(function MessageItem({
         return sessionId ? (
           <McpAppCard sessionId={sessionId} clientId={message.clientId}
             title={String(message.systemCardData?.title ?? '')}
+            plugin={message.systemCardData?.plugin}
             fallbackText={String(message.systemCardData?.fallbackText ?? '')} />
         ) : null;
       }
