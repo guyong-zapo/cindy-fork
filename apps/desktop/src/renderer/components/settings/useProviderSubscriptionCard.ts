@@ -215,7 +215,11 @@ export function useDeviceProviderSubscriptionCard(
   // Live mirrors observe epoch changes with the same cancellable lifecycle as
   // mount/resume. Native Codex retains its shared one-per-entry recovery probe.
   const { t } = useTranslation();
-  const kimi = useProviderAccountUsage(deviceId && isKimiCodingProviderView(provider) ? provider : undefined, undefined, deviceId);
+  const kimi = useProviderAccountUsage(
+    deviceId && isKimiCodingProviderView(activeProvider) ? activeProvider : undefined,
+    undefined,
+    deviceId,
+  );
   if (deviceId && kimi.supported) {
     const snapshot = kimi.result?.status === 'ready' ? kimi.result.snapshot : null;
     const card = buildKimiUsageCard(snapshot?.kind === 'kimi-coding-quota' ? snapshot : null, t);

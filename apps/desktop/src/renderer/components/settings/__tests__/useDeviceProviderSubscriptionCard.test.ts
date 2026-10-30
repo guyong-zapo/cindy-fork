@@ -200,6 +200,57 @@ describe('useDeviceProviderSubscriptionCard', () => {
     ]);
   });
 
+  // Unit r4421282213 / provider-groups §10: OAuth visibility cases do not
+  // exercise the separate Kimi reader. Through the real card/account hook and
+  // host gate, initial hiding must prevent reads, hiding must stop its minute
+  // timer, and restoration must immediately show the newly queried quota.
+  it.each(['document', 'native'] as const)('pauses Kimi live reads while %s visibility is hidden', async mode => {
+    const kimi = Object.assign(provider('kimi-visible', { method: 'apiKey' }), {
+      routing: { codex: { upstream: 'https://api.kimi.com/coding/v1' } },
+    });
+    const quota = (usedPercent: number) => ({
+      status: 'ready', stale: false,
+      snapshot: {
+        kind: 'kimi-coding-quota', fetchedAt: Date.now(),
+        windows: [{ id: 'limit_7d', usedPercent, resetsAt: null }],
+      },
+    });
+    let nativeHidden!: (hidden: boolean) => void;
+    window.electronAPI.onWindowHiddenChange = callback => { nativeHidden = callback; return () => {}; };
+    const disposeGate = installHiddenAnimationGate();
+    const visibility = vi.spyOn(document, 'visibilityState', 'get');
+    const hide = async (hidden: boolean) => act(async () => {
+      if (mode === 'native') nativeHidden(hidden);
+      else {
+        visibility.mockReturnValue(hidden ? 'hidden' : 'visible');
+        document.dispatchEvent(new Event('visibilitychange'));
+      }
+    });
+    try {
+      invoke.mockResolvedValue(quota(38));
+      await hide(true);
+      const hook = renderHook(() => useDeviceProviderSubscriptionCard(kimi, 'mini', { live: true }));
+      await act(async () => {});
+      expect(invoke).not.toHaveBeenCalled();
+      expect(hook.result.current).toBeNull();
+      await hide(false);
+      expect(invoke).toHaveBeenCalledTimes(1);
+      expect(remaining(hook.result.current)).toEqual([['limit_7d', 38]]);
+      await hide(true);
+      expect(hook.result.current).toBeNull();
+      await act(async () => vi.advanceTimersByTime(60_000));
+      expect(invoke).toHaveBeenCalledTimes(1);
+      invoke.mockResolvedValue(quota(76));
+      await hide(false);
+      expect(remaining(hook.result.current)).toEqual([['limit_7d', 76]]);
+      expect(invoke.mock.calls.map(([device, channel]) => [device, channel])).toEqual([
+        ['mini', 'maker:usage:kimi-coding'],
+        ['mini', 'maker:usage:kimi-coding'],
+      ]);
+      hook.unmount();
+    } finally { disposeGate(); }
+  });
+
   // Unit r4389934308 / §10: another ordinary subscriber keeps the mirror alive
   // while the group card hides or collapses. Global firstObserver missed this
   // gap. Exercise all three real fallback mirrors, and cancel only this card's
