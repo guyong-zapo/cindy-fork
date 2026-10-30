@@ -75,8 +75,14 @@ export function buildSettingsCodexUsageCard(
     (value) =>
       typeof value === 'string' && value.trim() && value.trim().toLowerCase() !== 'unknown',
   );
+  // A native read can succeed after an account switch while the legacy read
+  // fails and retains its old balance. Only combine explicitly matching IDs;
+  // an unbound native identity cannot establish ownership of fallback credits.
+  const credits = !snapshot || (snapshot.account.accountId && snapshot.account.accountId === account?.accountId)
+    ? account?.credits
+    : undefined;
   return buildCodexUsageCard(
-    quota || planType ? { ...quota, planType, credits: account?.credits } : null,
+    quota || planType ? { ...quota, planType, credits } : null,
     null, // Reset count and expiry belong to the collapsible reset list.
     t,
     nowMs,

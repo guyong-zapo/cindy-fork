@@ -112,6 +112,8 @@ describe('GroupMemberQuota', () => {
     { status: 'error', recovery: 'presence' },
     { status: 'loading', recovery: 'directory' },
   ] as const)('fences an initial online seed with a $status directory until $recovery', async ({ status, recovery }) => {
+    // Peer recovery is separate from local control; the current host seed grants it.
+    mocks.getState.mockResolvedValue({ linkStatus: 'online', disabledControlDeviceIds: [] });
     mocks.directoryStatus = status;
     const view = () => <GroupMemberQuota id="quota" target={{ kind: 'device', deviceId: 'mini', providerId: 'anthropic-1a2b' }} offline={false} />;
     const mounted = await mountQuota(view());
@@ -239,6 +241,39 @@ describe('GroupMemberQuota', () => {
     expect(mocks.control.size).toBe(0);
   });
 
+  // Unit r4421585007 / §10: revocation happened while collapsed. Existing
+  // control tests observed that event; a failed seed and failed directory leave
+  // no current local grant, even after relay and remote presence recover.
+  it.each(['push', 'directory'] as const)('requires current control evidence after a failed seed until %s recovery', async recovery => {
+    mocks.getState.mockRejectedValue(new Error('state unavailable'));
+    mocks.directoryStatus = 'error';
+    const view = () => <GroupMemberQuota id="quota" target={{ kind: 'device', deviceId: 'mini', providerId: 'anthropic-1a2b' }} offline={false} />;
+    const mounted = await mountQuota(view());
+    act(() => mocks.status.forEach(listener => listener({ status: 'online' })));
+    act(() => mocks.presence.forEach(listener => listener({
+      deviceId: 'mini', online: true, remoteControlEnabled: true,
+    } as DeviceLinkPresenceSnapshot)));
+    const unread = () => {
+      expect(screen.queryByTestId('quota-card')).toBeNull();
+      expect(mocks.deviceReads.at(-1)).toBeUndefined();
+      expect(mocks.cardReads.at(-1)).toEqual([undefined, null]);
+    };
+    unread();
+    if (recovery === 'push') {
+      act(() => mocks.control.forEach(listener => listener({ deviceId: 'mini', enabled: false, disabledControlDeviceIds: ['mini'] })));
+      unread();
+      act(() => mocks.control.forEach(listener => listener({ deviceId: 'mini', enabled: true, disabledControlDeviceIds: [] })));
+    } else {
+      mocks.directoryStatus = 'ready';
+      mocks.devices = mocks.devices!.map(row => ({ ...row, controlEnabled: false }));
+      mounted.rerender(view());
+      unread();
+      mocks.devices = mocks.devices!.map(row => ({ ...row, controlEnabled: true }));
+      mounted.rerender(view());
+    }
+    expect(screen.getByTestId('quota-card').textContent).toBe('Mini’s Claude');
+  });
+
   // Unit r4390515501 / §10: a ready directory already proved this target
   // online, but the group's stale offline flag won again on an unrelated list
   // refresh. Existing loading/error tests only covered unconfirmed old arrays.
@@ -359,6 +394,8 @@ describe('GroupMemberQuota', () => {
   // Error/loading cannot override the group's offline row without fresh target
   // presence; neither a cached provider nor an unrelated peer can enable reads.
   it.each(['error', 'loading'] as const)('keeps a stale-online directory unread while its request is %s', async (status) => {
+    // This case tests stale peer liveness with a current local control snapshot.
+    mocks.getState.mockResolvedValue({ linkStatus: 'online', disabledControlDeviceIds: [] });
     mocks.directoryStatus = status;
     const view = () => <GroupMemberQuota id="quota" target={{ kind: 'device', deviceId: 'mini', providerId: 'anthropic-1a2b' }} offline />;
     const mounted = await mountQuota(view());

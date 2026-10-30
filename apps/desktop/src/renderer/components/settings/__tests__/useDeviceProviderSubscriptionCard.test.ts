@@ -925,6 +925,46 @@ describe('useDeviceProviderSubscriptionCard', () => {
     expect(remaining(hook.result.current)).toEqual([['primary', 91]]);
   });
 
+  // Unit r4421585003 / §10: inverse of the stale-native regression above.
+  // A succeeds with credits, then B's native read succeeds while its mirror
+  // reread fails; absent or different native identity must not borrow A's cash.
+  it.each([
+    { mode: 'remount', accountId: null },
+    { mode: 'reconnect', accountId: 'account-b' },
+  ] as const)('fences legacy credits after an account switch on $mode', async ({ mode, accountId }) => {
+    const openai = provider('openai-credit-switch', { method: 'oauth', native: 'codex' });
+    const native = (id: string | null, usedPercent: number) => ({
+      providerId: openai.id, account: { accountId: id, planType: 'plus' },
+      rateLimits: { primary: { usedPercent, windowMinutes: 300 } },
+    });
+    const account = (id: string) => ({
+      providerId: openai.id, accountId: id,
+      primary: { usedPercent: 50, windowMinutes: 300 },
+      credits: { hasCredits: true, unlimited: false, balance: '5' },
+    });
+    invoke.mockImplementation(async (_deviceId, channel) => channel === 'maker:usage:account'
+      ? account('account-a') : native('account-a', 73));
+    let hook = renderHook(() => useDeviceProviderSubscriptionCard(openai, 'mini', { live: true }));
+    await act(async () => {});
+    expect(hook.result.current?.details).toContain('todaySpend.codex.creditsLine');
+    if (mode === 'remount') hook.unmount();
+    invoke.mockImplementation(async (_deviceId, channel) => {
+      if (channel === 'maker:usage:account') throw new Error('account mirror reread failed');
+      return native(accountId, 91);
+    });
+    if (mode === 'remount') hook = renderHook(() => useDeviceProviderSubscriptionCard(openai, 'mini', { live: true }));
+    else act(() => mocks.reopened.forEach(listener => listener({ deviceId: 'mini' })));
+    await act(async () => {});
+    expect(remaining(hook.result.current)).toEqual([['primary', 91]]);
+    expect(hook.result.current?.details).not.toContain('todaySpend.codex.creditsLine');
+    // Once both sources name B, credits can be shown again.
+    invoke.mockImplementation(async (_deviceId, channel) => channel === 'maker:usage:account'
+      ? account('account-b') : native('account-b', 96));
+    await act(async () => vi.advanceTimersByTime(15_000));
+    expect(remaining(hook.result.current)).toEqual([['primary', 96]]);
+    expect(hook.result.current?.details).toContain('todaySpend.codex.creditsLine');
+  });
+
   // Unit r4391955043 / §10: native-only recovery mocked the local account
   // mirror away. A pending fallback/credits read must survive hide/resume;
   // a failed follow-up must retain that first successful account payload.

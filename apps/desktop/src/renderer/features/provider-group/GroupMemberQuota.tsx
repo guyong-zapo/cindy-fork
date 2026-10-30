@@ -53,6 +53,7 @@ export function GroupMemberQuota({
   const remoteTarget = target.kind === 'device';
   const owner = getDataOwnerGeneration();
   const confirmedDirectory = useRef<{ owner: typeof owner; deviceId: string } | null>(null);
+  const confirmedControl = useRef<{ owner: typeof owner; deviceId: string } | null>(null);
   const previousGroupStatus = useRef({ owner, deviceId: targetDeviceId, offline });
   const offlineRecovery = useRef<{ owner: typeof owner; deviceId: string | null; directory: typeof devices } | null>(null);
   const groupWentOffline = previousGroupStatus.current.owner === owner &&
@@ -160,7 +161,8 @@ export function GroupMemberQuota({
   // listDevices preserves its old array after a failed refresh. A target push
   // remains fresher until the directory changes; local control permission comes
   // from the local preference snapshot, falling back to directory data only when
-  // that snapshot is unavailable, never from a remote online announcement.
+  // that snapshot is unavailable and this mount has current directory evidence,
+  // never from a remote online announcement.
   const currentPresence = !groupWentOffline && presence?.deviceId === targetDeviceId && presence.directory === devices &&
     isDataOwnerGenerationCurrent(presence.owner) ? presence : null;
   const device = target.kind === 'device' ? devices?.find((entry) => entry.deviceId === target.deviceId) : undefined;
@@ -193,9 +195,17 @@ export function GroupMemberQuota({
     if (!awaitingGroupPeer) offlineRecovery.current = null;
   }, [owner, targetDeviceId, device, directoryRequest.status, relayStatus, awaitingPeer, awaitingGroupPeer,
     currentPresence?.online, currentPresence?.remoteControlEnabled]);
+  useLayoutEffect(() => {
+    if (!targetDeviceId || !device?.controlEnabled) confirmedControl.current = null;
+    else if (directoryRequest.status === 'ready') confirmedControl.current = { owner, deviceId: targetDeviceId };
+  }, [owner, targetDeviceId, device, directoryRequest.status]);
+  // A local grant confirmed while mounted survives unrelated list failures and
+  // remote liveness changes. A new mount cannot inherit an unconfirmed old grant.
+  const hasDirectoryControl = directoryRequest.status === 'ready' ||
+    (confirmedControl.current?.owner === owner && confirmedControl.current.deviceId === targetDeviceId);
   const controlEnabled = targetDeviceId !== null && control?.owner === owner
     ? !control.disabledDeviceIds.includes(targetDeviceId)
-    : device?.controlEnabled;
+    : hasDirectoryControl && device?.controlEnabled;
   // A group row or remote presence cannot supply a local control grant.
   // A matching directory row is still required for provider and quota reads.
   // During an unknown/failed directory refresh, an offline group row also wins
