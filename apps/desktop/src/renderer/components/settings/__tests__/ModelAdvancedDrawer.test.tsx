@@ -10,6 +10,8 @@ const mocks = vi.hoisted(() => ({
   target: vi.fn(),
   refetch: vi.fn(async () => true),
   catalogError: null as { reason: 'catalog-unavailable' } | null,
+  imageTarget: vi.fn(),
+  imageSet: vi.fn(async () => {}),
   limit: null as number | null,
 }));
 vi.mock('react-i18next', () => ({
@@ -33,6 +35,12 @@ vi.mock('@/hooks/useModelContextLimit', () => ({
       setLimit: mocks.setLimit,
       reset: mocks.reset,
     };
+  },
+}));
+vi.mock('@/hooks/useModelImageInputOverride', () => ({
+  useModelImageInputOverride: (target: unknown) => {
+    mocks.imageTarget(target);
+    return { value: null, mixed: false, loading: false, error: false, setValue: mocks.imageSet };
   },
 }));
 vi.mock('@/state/modelVisibilityPrefs', () => ({

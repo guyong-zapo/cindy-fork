@@ -42,6 +42,7 @@ import { CodexMark } from '@/components/icons/CodexMark';
 import { PiMark } from '@/components/icons/PiMark';
 import { useProviders } from '@/hooks/useProviders';
 import { useModelContextLimit } from '@/hooks/useModelContextLimit';
+import { useModelImageInputOverride } from '@/hooks/useModelImageInputOverride';
 import { parseContextTokenInput } from '../../../shared/modelContextLimit';
 import { ModelCompactionSettings } from './ModelCompactionSettings';
 import { modelPriceDetailRows, type ModelPricePresentation } from '@/lib/modelPriceFormat';
@@ -302,6 +303,7 @@ export function ModelAdvancedDrawer({
     [contextAgent, contextModel, provider.id, row, chatAgents],
   );
   const ctx = useModelContextLimit(open ? contextTarget : null);
+  const imageInputOverride = useModelImageInputOverride(open ? contextTarget : null);
   const canEditProtocol = provider.source === 'user' && !provider.auth?.native && !isManagedSidecarProviderId(provider.id);
   const canEditName = canEditProtocol && !isOrganizationManagedProvider(provider) &&
     !!row?.avail.length && row.avail.every(agent =>
@@ -1039,7 +1041,31 @@ export function ModelAdvancedDrawer({
                       </>
                     )}
                     <Row label={t('settings.providers.models.advanced.imageInput')}>
-                      <span
+                      {conversational && !isOrganizationManagedProvider(provider) ? (
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <button type="button" disabled={imageInputOverride.loading || localConfigurationBlocked}
+                              aria-label={t('settings.providers.models.advanced.imageInput')}
+                              className="inline-flex min-h-8 items-center gap-1.5 rounded-full px-2 py-1 text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] disabled:opacity-50">
+                              {imageInputOverride.mixed
+                                ? t('settings.providers.models.advanced.imageInputMixed')
+                                : imageInputOverride.value === null
+                                  ? <><span>{t('settings.providers.models.advanced.imageCapability.default')}</span><span aria-hidden>·</span><span>{t(`settings.providers.models.advanced.vision.${vision}`)}</span></>
+                                  : t(`settings.providers.models.advanced.${imageInputOverride.value ? 'supported' : 'unsupported'}`)}
+                              <ChevronDown size={12} aria-hidden />
+                            </button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent className="z-[10003]" align="end">
+                            <DropdownMenuRadioGroup
+                              value={imageInputOverride.mixed ? '' : imageInputOverride.value === null ? 'default' : String(imageInputOverride.value)}
+                              onValueChange={(value) => void imageInputOverride.setValue(value === 'default' ? null : value === 'true')}>
+                              <DropdownMenuRadioItem value="default">{t('settings.providers.models.advanced.imageCapability.default')}</DropdownMenuRadioItem>
+                              <DropdownMenuRadioItem value="true">{t('settings.providers.models.advanced.supported')}</DropdownMenuRadioItem>
+                              <DropdownMenuRadioItem value="false">{t('settings.providers.models.advanced.unsupported')}</DropdownMenuRadioItem>
+                            </DropdownMenuRadioGroup>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      ) : <span
                         title={
                           capabilityModel.modalities || capabilityModel.supportsImageInput !== undefined
                             ? t('settings.providers.models.advanced.catalogCapabilities')
@@ -1052,8 +1078,13 @@ export function ModelAdvancedDrawer({
                           }
                           label={t(`settings.providers.models.advanced.vision.${vision}`)}
                         />
-                      </span>
+                      </span>}
                     </Row>
+                    {imageInputOverride.error && (
+                      <p role="alert" className="text-12 leading-5 text-[var(--error-fg)]">
+                        {t('settings.providers.custom.toast.saveFailed')}
+                      </p>
+                    )}
                     {capabilityModel.modalities &&
                       (['input', 'output'] as const).map((direction) => (
                         <Row
