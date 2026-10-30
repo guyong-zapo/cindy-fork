@@ -3,7 +3,7 @@
  * 一个供应商连接的订阅额度卡按「哪台电脑 + 哪个供应商」读(供应商组展开看每台的额度用)：
  *   - deviceId 为 null 读本机账号，不读任何远端镜像；
  *   - 指定电脑时经 device-link 查询那台的额度，按那台的供应商 id 读，不借用本机同名账号；
- *   - 不是订阅类连接(API key 等)两边都不读。
+ *   - 没有受支持额度来源的连接两边都不读；Kimi 沿用自己的额度入口。
  */
 import { act, cleanup, renderHook } from '@testing-library/react';
 import type { ProviderView } from '@cindy/model-providers';
@@ -168,6 +168,38 @@ const remaining = (card: ReturnType<typeof useDeviceProviderSubscriptionCard>) =
   card?.windows.map((window) => [window.key, window.window.utilization]);
 
 describe('useDeviceProviderSubscriptionCard', () => {
+  // Unit / upstream 94b7271fc9 + provider-settings §4: Kimi's new quota source
+  // shares this entry with live group cards. Existing OAuth cases cannot detect
+  // the old catch-all xAI refresh. A remote Kimi card must render its own result
+  // and retain the upstream minute reader without sending a 15s xAI query.
+  it('keeps the Kimi card and its refresh requests on the Kimi endpoint', async () => {
+    const kimi = Object.assign(provider('kimi-code', { method: 'apiKey' }), {
+      routing: { codex: { upstream: 'https://api.kimi.com/coding/v1' } },
+    });
+    invoke.mockResolvedValue({
+      status: 'ready',
+      stale: false,
+      snapshot: {
+        kind: 'kimi-coding-quota',
+        fetchedAt: Date.now(),
+        windows: [{ id: 'limit_7d', usedPercent: 38, resetsAt: null }],
+      },
+    });
+    const card = renderHook(() => useDeviceProviderSubscriptionCard(kimi, 'mini', { live: true }));
+    await act(async () => {});
+    expect(card.result.current?.title).toBe('Kimi Code');
+    expect(remaining(card.result.current)).toEqual([['limit_7d', 38]]);
+    await act(async () => vi.advanceTimersByTime(15_000));
+    expect(invoke.mock.calls.map(([device, channel]) => [device, channel])).toEqual([
+      ['mini', 'maker:usage:kimi-coding'],
+    ]);
+    await act(async () => vi.advanceTimersByTime(45_000));
+    expect(invoke.mock.calls.map(([device, channel]) => [device, channel])).toEqual([
+      ['mini', 'maker:usage:kimi-coding'],
+      ['mini', 'maker:usage:kimi-coding'],
+    ]);
+  });
+
   // Unit r4389934308 / §10: another ordinary subscriber keeps the mirror alive
   // while the group card hides or collapses. Global firstObserver missed this
   // gap. Exercise all three real fallback mirrors, and cancel only this card's

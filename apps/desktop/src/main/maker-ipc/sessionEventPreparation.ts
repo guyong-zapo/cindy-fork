@@ -52,9 +52,9 @@ import {
 import type { UsageLimitAutoResume } from './usageLimitAutoResume.js';
 import { isBotGroupClientId } from '../../shared/botGroupChat.js';
 
-/** Bot DMs and group-lane turns answer an internal channel, not the user watching this Session. */
+/** Group-lane output belongs in its group. A DM input is hidden, but its answer belongs to the owner. */
 function isBotPrivateInput(clientId: string): boolean {
-  return clientId.startsWith('bot-dm:') || isBotGroupClientId(clientId);
+  return isBotGroupClientId(clientId);
 }
 
 interface DismissedInteraction {
@@ -214,6 +214,9 @@ export function prepareSessionEvent(
     deps.interruptedTurnAutoResumeGuard.noteAttemptEvent(session.id, event.turnAttemptToken);
   }
   // Snapshot before onTurnEvent releases the active input and drains the next queue item.
+  const pluginTargetInputIds = event.turnScope !== 'background'
+    ? (deps.agentInputCoordinatorHolder?.getActiveInputClientIds?.(session.id, event.sessionTurnGeneration) ?? [])
+      .filter(id => id.startsWith('plugin-target:')) : [];
   const botTaskResultInputIds = event.type === 'done' && event.turnScope !== 'background'
     ? (deps.agentInputCoordinatorHolder?.getActiveInputClientIds?.(session.id, event.sessionTurnGeneration) ?? [])
       .filter(id => taskResultClientIdForInput(id) !== null) : [];
@@ -614,6 +617,7 @@ export function prepareSessionEvent(
     event,
     attributedEvent,
     botTaskResultInputIds,
+    pluginTargetInputIds,
     groupLaneInputClientId,
     broadcastEvent,
     eventAgentMeta,

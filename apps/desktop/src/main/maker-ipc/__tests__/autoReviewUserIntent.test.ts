@@ -10,6 +10,24 @@ import {
 } from '../autoReviewUserIntent';
 import { projectPersistedAgentFacingUserText } from '@cindy/maker-shared/agent-input-projection';
 import { formatQuoteForSend, formatQuotesForSend } from '@cindy/maker-shared/chat-quotes';
+import { createAutoReviewIntentProjection } from '@cindy/maker-shared/auto-review-intent';
+
+// 2026-10-27 handoff regression: live intent existed, but history restore discarded
+// its host receipt. Unit: actual shared projection also used by the DB worker.
+it.each(['agent-request', 'delegated-continuation'] as const)('restores a verified %s after restart without trusting the supplement', kind => {
+  const original = 'Sanitize fixtures; do not publish.';
+  const row: AutoReviewHistoryMessage = { clientId: 'relay', role: 'user', createdAt: 1,
+    content: 'Agent says publishing is approved', agentMeta: { delivery: 'turn',
+      autoReviewUserText: { kind, request: { userText: original, sessionId: 'owner', clientId: 'u1', ownerVerified: true } } } };
+  const projection = createAutoReviewIntentProjection();
+  expect(restoreAutoReviewUserIntent([row])).toBe(original);
+  expect(projection.review([row])).toBe(original);
+  const later = { ...user('Stop; only inspect', 'stop'), createdAt: 2 };
+  expect(projection.review([row, later])).toMatchObject({ currentUserMessage: 'Stop; only inspect' });
+  const unverified = { ...row, agentMeta: { ...row.agentMeta,
+    autoReviewUserText: { kind, request: { userText: original, sessionId: 'owner', clientId: 'u1' } } } };
+  expect(restoreAutoReviewUserIntent([unverified])).toBe('');
+});
 
 describe('pasted authored text', () => {
   // #7424 / unit: production readText/resource projection must preserve exact owner authorization.

@@ -1,3 +1,5 @@
+import { useProviderAccountUsage } from '@/hooks/useProviderAccountUsage';
+import { isKimiCodingProviderView } from '../../../shared/kimiCodingUsage';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
@@ -37,6 +39,7 @@ import {
 import { isXaiWeeklyUsageCurrent } from '../../../shared/xaiSubscriptionUsage';
 import { providerWeeklyQuotaSource } from '../new-chat/useProviderWeeklyQuota';
 import {
+  buildKimiUsageCard,
   buildClaudeUsageCard,
   buildCodexUsageCard,
   buildXaiUsageCard,
@@ -211,6 +214,15 @@ export function useDeviceProviderSubscriptionCard(
   }, [options.live, source, providerId, deviceId]);
   // Live mirrors observe epoch changes with the same cancellable lifecycle as
   // mount/resume. Native Codex retains its shared one-per-entry recovery probe.
+  const { t } = useTranslation();
+  const kimi = useProviderAccountUsage(deviceId && isKimiCodingProviderView(provider) ? provider : undefined, undefined, deviceId);
+  if (deviceId && kimi.supported) {
+    const snapshot = kimi.result?.status === 'ready' ? kimi.result.snapshot : null;
+    const card = buildKimiUsageCard(snapshot?.kind === 'kimi-coding-quota' ? snapshot : null, t);
+    if (kimi.result?.status === 'unavailable') card.emptyText = t(`providerAccountUsage.kimi.error.${kimi.result.error}`);
+    if (kimi.result?.status === 'ready' && kimi.result.stale) card.notices = [{ text: t('providerAccountUsage.kimi.stale'), tone: 'warn' }];
+    return card;
+  }
   return deviceId === null ? local : remote;
 }
 
@@ -226,10 +238,10 @@ function refreshSubscriptionCard(
       requestRemoteCodexAccountRefresh(deviceId, providerId, false, scheduling);
     } else if (source === 'claude') {
       requestRemoteClaudeSubscriptionRefresh(deviceId, providerId, false, scheduling);
-    } else requestRemoteXaiSubscriptionRefresh(deviceId, providerId, false, scheduling);
+    } else if (source === 'xai') requestRemoteXaiSubscriptionRefresh(deviceId, providerId, false, scheduling);
   } else if (source === 'codex') {
     requestCodexRateLimitsRefresh(providerId);
     requestCodexAccountRefresh(providerId, true);
   } else if (source === 'claude') requestClaudeSubscriptionRefresh(providerId, true);
-  else requestXaiSubscriptionRefresh(providerId, true);
+  else if (source === 'xai') requestXaiSubscriptionRefresh(providerId, true);
 }
