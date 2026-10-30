@@ -171,38 +171,63 @@ describe('useDeviceProviderSubscriptionCard', () => {
   // Unit / upstream 94b7271fc9 + provider-settings §4: Kimi's new quota source
   // shares this entry with live group cards. Existing OAuth cases cannot detect
   // the old catch-all xAI refresh. A remote Kimi card must render its own result
-  // and retain the upstream minute reader without sending a 15s xAI query.
-  it('keeps the Kimi card and its refresh requests on the Kimi endpoint', async () => {
+  // without sending an xAI query. Unit r4421724529 / §10: the earlier case
+  // incorrectly kept the minute interval for live cards too. Separate ordinary
+  // minute reads from live 15s reads, including a pending periodic request.
+  it.each([false, true])('keeps Kimi reads on its endpoint with live=%s cadence', async live => {
     const kimi = Object.assign(provider('kimi-code', { method: 'apiKey' }), {
       routing: { codex: { upstream: 'https://api.kimi.com/coding/v1' } },
     });
-    invoke.mockResolvedValue({
+    const quota = (usedPercent: number) => ({
       status: 'ready',
       stale: false,
       snapshot: {
         kind: 'kimi-coding-quota',
         fetchedAt: Date.now(),
-        windows: [{ id: 'limit_7d', usedPercent: 38, resetsAt: null }],
+        windows: [{ id: 'limit_7d', usedPercent, resetsAt: null }],
       },
     });
-    const card = renderHook(() => useDeviceProviderSubscriptionCard(kimi, 'mini', { live: true }));
+    invoke.mockResolvedValue(quota(38));
+    const card = renderHook(() => useDeviceProviderSubscriptionCard(kimi, 'mini', { live }));
     await act(async () => {});
     expect(card.result.current?.title).toBe('Kimi Code');
     expect(remaining(card.result.current)).toEqual([['limit_7d', 38]]);
-    await act(async () => vi.advanceTimersByTime(15_000));
-    expect(invoke.mock.calls.map(([device, channel]) => [device, channel])).toEqual([
-      ['mini', 'maker:usage:kimi-coding'],
-    ]);
-    await act(async () => vi.advanceTimersByTime(45_000));
-    expect(invoke.mock.calls.map(([device, channel]) => [device, channel])).toEqual([
-      ['mini', 'maker:usage:kimi-coding'],
-      ['mini', 'maker:usage:kimi-coding'],
-    ]);
+    await act(async () => vi.advanceTimersByTime(14_999));
+    expect(invoke).toHaveBeenCalledTimes(1);
+    invoke.mockResolvedValue(quota(76));
+    await act(async () => vi.advanceTimersByTime(1));
+    expect(remaining(card.result.current)).toEqual([['limit_7d', live ? 76 : 38]]);
+    // The host keeps successful snapshots for five minutes. Live polling must
+    // request fresh data via its existing throttled path; ordinary reads cache.
+    expect(invoke.mock.calls.at(-1)?.[2]).toEqual([{ providerId: kimi.id, forceRefresh: live }]);
+    if (live) {
+      let finish!: (value: ReturnType<typeof quota>) => void;
+      invoke.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+      await act(async () => vi.advanceTimersByTime(15_000));
+      expect(invoke).toHaveBeenCalledTimes(3);
+      await act(async () => vi.advanceTimersByTime(45_000));
+      expect(invoke).toHaveBeenCalledTimes(3); // Periodic ticks share the pending read.
+      await act(async () => finish(quota(84)));
+      expect(remaining(card.result.current)).toEqual([['limit_7d', 84]]);
+      invoke.mockResolvedValue(quota(91));
+      await act(async () => vi.advanceTimersByTime(15_000));
+      expect(remaining(card.result.current)).toEqual([['limit_7d', 91]]);
+    } else {
+      await act(async () => vi.advanceTimersByTime(45_000));
+      expect(remaining(card.result.current)).toEqual([['limit_7d', 76]]);
+    }
+    const reads = live ? 4 : 2;
+    expect(invoke.mock.calls.map(([device, channel]) => [device, channel])).toEqual(
+      Array.from({ length: reads }, () => ['mini', 'maker:usage:kimi-coding']),
+    );
+    card.unmount();
+    await act(async () => vi.advanceTimersByTime(60_000));
+    expect(invoke).toHaveBeenCalledTimes(reads);
   });
 
   // Unit r4421282213 / provider-groups §10: OAuth visibility cases do not
   // exercise the separate Kimi reader. Through the real card/account hook and
-  // host gate, initial hiding must prevent reads, hiding must stop its minute
+  // host gate, initial hiding must prevent reads, hiding must stop its polling
   // timer, and restoration must immediately show the newly queried quota.
   it.each(['document', 'native'] as const)('pauses Kimi live reads while %s visibility is hidden', async mode => {
     const kimi = Object.assign(provider('kimi-visible', { method: 'apiKey' }), {

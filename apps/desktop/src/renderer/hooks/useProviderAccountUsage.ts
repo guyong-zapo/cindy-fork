@@ -9,7 +9,7 @@
  * `agent` 用于会话场景（输入框 chip）：同一供应商各引擎可用不同账户的独立密钥，
  * 传入会话所在引擎才能对准当前会话实际消耗的账户；设置页供应商级视图不传。
  * 组成员卡可用 live/active 暂停观察而保留在途结果，并用 refreshEpoch 排一次
- * 可取消的恢复补读；默认调用仍保持原来的一分钟读取与取消语义。
+ * 可取消的恢复补读；组实时卡每 15s 读取，默认调用保持一分钟与取消语义。
  */
 
 import { isDeviceLinkRemotePushCurrent } from '../lib/remoteDataOwnerPushFence';
@@ -99,7 +99,9 @@ export function useProviderAccountUsage(
       try {
         const input = {
           providerId: provider.id,
-          forceRefresh,
+          // Live polling must bypass the ordinary five-minute host cache;
+          // the existing host throttle and Retry-After still apply.
+          forceRefresh: forceRefresh || live,
           ...(agent ? { agent } : {}),
         };
         const next = deviceId
@@ -160,8 +162,9 @@ export function useProviderAccountUsage(
     if (live && lifecycle.observed && lifecycle.pending > 0) lifecycle.liveRefreshes.add(recovery);
     lifecycle.observed = true;
     void load(false);
-    // 余额/窗口会随使用变化，挂载期间低频静默刷新（main 缓存优先，不会放大上游请求）。
-    const timer = window.setInterval(() => void load(false), REFRESH_INTERVAL_MS);
+    // Expanded group cards use the 15s cadence; ordinary readers keep one minute.
+    // Pending live reads are coalesced by load, and hidden cards have no timer.
+    const timer = window.setInterval(() => void load(false), live ? 15_000 : REFRESH_INTERVAL_MS);
     return () => {
       window.clearInterval(timer);
       lifecycle.liveRefreshes.delete(recovery);
