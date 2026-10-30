@@ -251,6 +251,93 @@ describe('useDeviceProviderSubscriptionCard', () => {
     } finally { disposeGate(); }
   });
 
+  // Unit r4421407152 / provider-groups §10: the Kimi reader has its own
+  // request lifecycle. Settled visibility coverage missed recovery during a
+  // pending read, lost peer-only reconnects, and cancellation of that reread.
+  it.each(['foreground', 'reconnect'] as const)('retains pending Kimi quota through %s recovery', async recovery => {
+    const kimi = Object.assign(provider('kimi-pending', { method: 'apiKey' }), {
+      routing: { codex: { upstream: 'https://api.kimi.com/coding/v1' } },
+    });
+    let finish!: (value: unknown) => void;
+    invoke.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }))
+      .mockRejectedValue(new Error('temporary reconnect failure'));
+    const hook = renderHook(() => useDeviceProviderSubscriptionCard(kimi, 'mini', { live: true }));
+    await act(async () => {});
+    expect(invoke).toHaveBeenCalledTimes(1);
+    if (recovery === 'foreground') {
+      vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+      await act(async () => document.dispatchEvent(new Event('visibilitychange')));
+      vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+      await act(async () => document.dispatchEvent(new Event('visibilitychange')));
+    } else {
+      await act(async () => mocks.reopened.forEach(listener => listener({ deviceId: 'mini' })));
+    }
+    expect(invoke).toHaveBeenCalledTimes(1);
+    await act(async () => finish({ status: 'ready', stale: false, snapshot: {
+      kind: 'kimi-coding-quota', fetchedAt: Date.now(),
+      windows: [{ id: 'limit_7d', usedPercent: 38, resetsAt: null }],
+    } }));
+    expect(invoke).toHaveBeenCalledTimes(2);
+    expect(remaining(hook.result.current)).toEqual([['limit_7d', 38]]);
+    expect(hook.result.current?.notices).toEqual([{ text: 'providerAccountUsage.kimi.stale', tone: 'warn' }]);
+  });
+
+  it('refreshes settled Kimi quota on the target peer reconnect without waiting a minute', async () => {
+    const kimi = Object.assign(provider('kimi-reconnect', { method: 'apiKey' }), {
+      routing: { codex: { upstream: 'https://api.kimi.com/coding/v1' } },
+    });
+    const quota = (usedPercent: number) => ({ status: 'ready', stale: false, snapshot: {
+      kind: 'kimi-coding-quota', fetchedAt: Date.now(),
+      windows: [{ id: 'limit_7d', usedPercent, resetsAt: null }],
+    } });
+    invoke.mockResolvedValue(quota(38));
+    const hook = renderHook(() => useDeviceProviderSubscriptionCard(kimi, 'mini', { live: true }));
+    await act(async () => {});
+    invoke.mockResolvedValue(quota(76));
+    await act(async () => mocks.reopened.forEach(listener => listener({ deviceId: 'other' })));
+    expect(invoke).toHaveBeenCalledTimes(1);
+    await act(async () => mocks.reopened.forEach(listener => listener({ deviceId: 'mini' })));
+    expect(invoke).toHaveBeenCalledTimes(2);
+    expect(remaining(hook.result.current)).toEqual([['limit_7d', 76]]);
+  });
+
+  it.each(['hidden', 'unmount', 'owner', 'provider'] as const)('cancels queued Kimi recovery on %s', async change => {
+    const kimi = Object.assign(provider('kimi-cancel', { method: 'apiKey' }), {
+      routing: { codex: { upstream: 'https://api.kimi.com/coding/v1' } },
+    });
+    const quota = (usedPercent: number) => ({ status: 'ready', stale: false, snapshot: {
+      kind: 'kimi-coding-quota', fetchedAt: Date.now(),
+      windows: [{ id: 'limit_7d', usedPercent, resetsAt: null }],
+    } });
+    let finish!: (value: unknown) => void;
+    invoke.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }))
+      .mockResolvedValue(quota(76));
+    const hook = renderHook(({ account }) => useDeviceProviderSubscriptionCard(account, 'mini', { live: true }), {
+      initialProps: { account: kimi },
+    });
+    await act(async () => {});
+    await act(async () => mocks.reopened.forEach(listener => listener({ deviceId: 'mini' })));
+    expect(invoke).toHaveBeenCalledTimes(1);
+    if (change === 'hidden') {
+      vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+      await act(async () => document.dispatchEvent(new Event('visibilitychange')));
+    } else if (change === 'unmount') hook.unmount();
+    else {
+      if (change === 'owner') setDataOwnerGeneration('owner-b');
+      hook.rerender({ account: change === 'provider' ? { ...kimi, id: 'kimi-other' } : kimi });
+      await act(async () => {});
+    }
+    await act(async () => finish(quota(38)));
+    expect(invoke).toHaveBeenCalledTimes(change === 'hidden' || change === 'unmount' ? 1 : 2);
+    if (change === 'hidden') {
+      expect(hook.result.current).toBeNull();
+      vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+      await act(async () => document.dispatchEvent(new Event('visibilitychange')));
+      expect(invoke).toHaveBeenCalledTimes(2);
+    }
+    if (change !== 'unmount') expect(remaining(hook.result.current)).toEqual([['limit_7d', 76]]);
+  });
+
   // Unit r4389934308 / §10: another ordinary subscriber keeps the mirror alive
   // while the group card hides or collapses. Global firstObserver missed this
   // gap. Exercise all three real fallback mirrors, and cancel only this card's

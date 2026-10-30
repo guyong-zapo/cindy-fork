@@ -216,9 +216,10 @@ export function useDeviceProviderSubscriptionCard(
   // mount/resume. Native Codex retains its shared one-per-entry recovery probe.
   const { t } = useTranslation();
   const kimi = useProviderAccountUsage(
-    deviceId && isKimiCodingProviderView(activeProvider) ? activeProvider : undefined,
+    deviceId && isKimiCodingProviderView(provider) ? provider : undefined,
     undefined,
     deviceId,
+    { live: options.live === true, active, refreshEpoch: epoch },
   );
   if (deviceId && kimi.supported) {
     const snapshot = kimi.result?.status === 'ready' ? kimi.result.snapshot : null;
